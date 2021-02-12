@@ -908,6 +908,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doc-comment"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
+
+[[package]]
 name = "dtoa"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3898,6 +3904,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysinfo"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c14e2f7068e99d8d3e3580787ffc6c7d21ad90393ff5e54523435197ccb43e6"
+dependencies = [
+ "cc",
+ "cfg-if 1.0.0",
+ "core-foundation-sys",
+ "doc-comment",
+ "libc",
+ "ntapi",
+ "once_cell",
+ "rayon",
+ "winapi 0.3.9",
+]
+
+[[package]]
 name = "take_mut"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4805,6 +4828,7 @@ name = "watchdog"
 version = "0.10.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "clap",
  "failure",
  "fs2",
@@ -4820,8 +4844,10 @@ dependencies = [
  "slog",
  "slog-async",
  "slog-term",
+ "sysinfo",
  "tokio 1.2.0",
  "wait-timeout",
+ "warp",
 ]
 
 [[package]]
