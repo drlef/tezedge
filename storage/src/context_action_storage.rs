@@ -1264,6 +1264,7 @@ mod tests {
             block_hash: None,
             operation_hash: None,
             tree_hash: None,
+            tree_id: 0,
             key: to_key(key),
             value: Vec::new(),
             value_as_json: None,
