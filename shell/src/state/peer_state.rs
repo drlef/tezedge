@@ -3,7 +3,7 @@
 
 use std::cmp;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use riker::actors::*;
@@ -20,13 +20,14 @@ use tezos_messages::p2p::encoding::prelude::{
 
 use crate::peer_branch_bootstrapper::PeerBranchBootstrapperRef;
 use crate::state::synchronization_state::UpdateIsBootstrapped;
-use crate::state::MissingOperations;
+use crate::state::{MissingOperations, StateError};
 
-// TODO: TE-386 - remove not needed
-// /// Limit to how many blocks to request in a batch
-// const BLOCK_HEADERS_BATCH_SIZE: usize = 10;
-// /// Limit to how many block operations to request in a batch
-// const BLOCK_OPERATIONS_BATCH_SIZE: usize = 15;
+/// Limit to how many blocks to request from peer
+/// Note: This limits speed of downloading chunked history
+const BLOCK_HEADERS_MAX_QUEUE_SIZE: u16 = 10;
+/// Limit to how many block operations to request from peer
+const BLOCK_OPERATIONS_MAX_QUEUE_SIZE: u16 = 15;
+
 /// Limit to how many mempool operations to request in a batch
 const MEMPOOL_OPERATIONS_BATCH_SIZE: usize = 20;
 /// Mempool operation time to live
@@ -43,6 +44,8 @@ pub struct PeerState {
 
     /// Actor for managing current branch bootstrap from peer
     pub(crate) peer_branch_bootstrapper: Option<PeerBranchBootstrapperRef>,
+
+    pub(crate) queues: Arc<DataQueues>,
 
     // TODO: TE-386 - rename
     /// Queued blocks shared with peer_branch_bootstrapper
@@ -73,11 +76,6 @@ pub struct PeerState {
     /// Last time we received current_head from the peer
     pub(crate) current_head_response_last: Instant,
 
-    /// Last time we requested block from the peer
-    pub(crate) block_request_last: Instant,
-    /// Last time we received block from the peer
-    pub(crate) block_response_last: Instant,
-
     /// Last time we requested block operations from the peer
     pub(crate) block_operations_request_last: Instant,
     /// Last time we received block operations from the peer
@@ -95,6 +93,9 @@ pub struct PeerState {
     /// a tuple of type of a mempool operation with its time to live.
     pub(crate) queued_mempool_operations:
         HashMap<OperationHash, (MempoolOperationType, SystemTime)>,
+
+    /// Collected stats about p2p messages
+    pub(crate) message_stats: MessageStats,
 }
 
 impl PeerState {
@@ -104,24 +105,24 @@ impl PeerState {
             mempool_enabled: !peer_metadata.disable_mempool(),
             is_bootstrapped: false,
             peer_branch_bootstrapper: None,
+            queues: Arc::new(DataQueues::new(
+                BLOCK_HEADERS_MAX_QUEUE_SIZE,
+                BLOCK_OPERATIONS_MAX_QUEUE_SIZE,
+            )),
             queued_block_headers2: Arc::new(Mutex::new(HashSet::default())),
             queued_block_operations2: Arc::new(Mutex::new(HashMap::default())),
-            // missing_blocks: MissingBlockData::default(),
             missing_operations_for_blocks: HashMap::default(),
-            // queued_block_headers: HashMap::new(),
-            // queued_block_operations: HashMap::new(),
             missing_mempool_operations: Vec::new(),
             queued_mempool_operations: HashMap::default(),
             current_head_level: None,
             current_head_update_last: Instant::now(),
             current_head_request_last: Instant::now(),
             current_head_response_last: Instant::now(),
-            block_request_last: Instant::now(),
-            block_response_last: Instant::now(),
             block_operations_request_last: Instant::now(),
             block_operations_response_last: Instant::now(),
             mempool_operations_request_last: Instant::now(),
             mempool_operations_response_last: Instant::now(),
+            message_stats: MessageStats::default(),
         }
     }
 
@@ -312,6 +313,87 @@ impl PeerState {
                 peer.mempool_operations_request_last = Instant::now();
                 tell_peer(GetOperationsMessage::new(ops_to_get).into(), peer);
             });
+    }
+
+    pub(crate) fn is_block_response_pending(&self, timeout: Duration) -> Result<bool, StateError> {
+        let block_request_last = (*self.queues.block_request_last.read()?).clone();
+        let block_response_last = (*self.queues.block_response_last.read()?).clone();
+
+        Ok(if block_request_last > block_response_last {
+            if block_request_last - block_response_last > timeout {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        })
+    }
+}
+
+/// Hold stats about peer received messages
+pub struct MessageStats {
+    unexpected_response_block: usize,
+    unexpected_response_operations: usize,
+}
+
+impl MessageStats {
+    pub fn increment_unexpected_response_block(&mut self) {
+        self.unexpected_response_block += 1;
+    }
+
+    pub fn increment_unexpected_response_operations(&mut self) {
+        self.unexpected_response_operations += 1;
+    }
+}
+
+impl Default for MessageStats {
+    fn default() -> Self {
+        Self {
+            unexpected_response_block: 0,
+            unexpected_response_operations: 0,
+        }
+    }
+}
+
+pub struct DataQueues {
+    max_queued_block_headers_count: u16,
+    max_queued_block_operations_count: u16,
+
+    /// Queued blocks shared with peer_branch_bootstrapper
+    pub(crate) queued_block_headers: Arc<Mutex<HashSet<Arc<BlockHash>>>>,
+
+    /// Last time we requested block from the peer
+    pub(crate) block_request_last: Arc<RwLock<Instant>>,
+    /// Last time we received block from the peer
+    pub(crate) block_response_last: Arc<RwLock<Instant>>,
+
+    /// Queued block operations
+    pub(crate) queued_block_operations: Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
+}
+
+impl DataQueues {
+    pub fn new(
+        max_queued_block_headers_count: u16,
+        max_queued_block_operations_count: u16,
+    ) -> Self {
+        Self {
+            max_queued_block_headers_count,
+            queued_block_headers: Arc::new(Mutex::new(HashSet::default())),
+            block_request_last: Arc::new(RwLock::new(Instant::now())),
+            block_response_last: Arc::new(RwLock::new(Instant::now())),
+            max_queued_block_operations_count,
+            queued_block_operations: Arc::new(Mutex::new(HashMap::default())),
+        }
+    }
+
+    pub fn available_queued_block_headers_capacity(&self) -> Result<usize, StateError> {
+        let queued_count = self.queued_block_headers.lock()?.len();
+        if queued_count < self.max_queued_block_headers_count as usize {
+            Ok((self.max_queued_block_headers_count as usize) - queued_count)
+        } else {
+            Ok(0)
+        }
     }
 }
 

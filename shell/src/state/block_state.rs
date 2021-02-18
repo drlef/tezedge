@@ -31,6 +31,7 @@ use crate::peer_branch_bootstrapper::{
 };
 use crate::shell_channel::ShellChannelRef;
 use crate::state::bootstrap_state::InnerBlockState;
+use crate::state::data_requester::DataRequesterRef;
 use crate::state::head_state::CurrentHeadRef;
 use crate::state::peer_state::PeerState;
 use crate::state::StateError;
@@ -56,6 +57,9 @@ pub struct BlockchainState {
     /// Operations metadata storage
     operations_meta_storage: OperationsMetaStorage,
 
+    /// Utility for managing different data requests
+    requester: DataRequesterRef,
+
     /// Chain feeder - actor, which is responsible to apply_block to context
     block_applier: ChainFeederRef,
 
@@ -69,6 +73,7 @@ pub struct BlockchainState {
 
 impl BlockchainState {
     pub fn new(
+        requester: DataRequesterRef,
         persistent_storage: &PersistentStorage,
         block_applier: ChainFeederRef,
         shell_channel: ShellChannelRef,
@@ -77,6 +82,7 @@ impl BlockchainState {
         chain_genesis_block_hash: Arc<BlockHash>,
     ) -> Self {
         BlockchainState {
+            requester,
             block_storage: BlockStorage::new(persistent_storage),
             block_meta_storage: BlockMetaStorage::new(persistent_storage),
             chain_meta_storage: ChainMetaStorage::new(persistent_storage),
@@ -88,6 +94,10 @@ impl BlockchainState {
             chain_id,
             chain_genesis_block_hash,
         }
+    }
+
+    pub(crate) fn requester(&self) -> &DataRequesterRef {
+        &self.requester
     }
 
     /// Validate if we can accept branch
@@ -411,6 +421,8 @@ impl BlockchainState {
                     PeerBranchBootstrapper::actor(
                         sys,
                         peer.peer_id.clone(),
+                        peer.queues.clone(),
+                        self.requester.clone(),
                         peer.queued_block_headers2.clone(),
                         peer.queued_block_operations2.clone(),
                         self.shell_channel.clone(),
@@ -711,10 +723,12 @@ impl BlockchainState {
 
 #[cfg(test)]
 mod tests {
-    use slog::{Drain, Level, Logger};
+    use slog::Level;
 
     use crypto::hash::chain_id_from_block_hash;
     use storage::tests_common::TmpStorage;
+
+    use crate::state::tests::prerequisites::create_logger;
 
     use super::*;
 
@@ -907,19 +921,6 @@ mod tests {
         );
 
         Ok(())
-    }
-
-    fn create_logger(level: Level) -> Logger {
-        let drain = slog_async::Async::new(
-            slog_term::FullFormat::new(slog_term::TermDecorator::new().build())
-                .build()
-                .fuse(),
-        )
-        .build()
-        .filter_level(level)
-        .fuse();
-
-        Logger::root(drain, slog::o!())
     }
 
     mod data {

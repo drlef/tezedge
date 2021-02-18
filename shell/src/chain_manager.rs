@@ -45,6 +45,7 @@ use crate::shell_channel::{
     ShellChannelMsg, ShellChannelRef, ShellChannelTopic,
 };
 use crate::state::block_state::{BlockAcceptanceResult, BlockchainState};
+use crate::state::data_requester::{DataRequester, DataRequesterRef};
 use crate::state::head_state::CurrentHeadRef;
 use crate::state::peer_state::{tell_peer, PeerState};
 use crate::state::synchronization_state::{
@@ -321,7 +322,7 @@ impl ChainManager {
                 match peers.get_mut(received.peer.uri()) {
                     Some(peer) => {
                         let log = ctx.system.log().new(
-                            slog::o!("peer_id" => peer.peer_id.as_ref().peer_id_marker.clone()),
+                            slog::o!("peer_id" => peer.peer_id.as_ref().peer_id_marker.clone(), "peer_ip" => peer.peer_id.as_ref().peer_address.to_string(), "peer" => peer.peer_id.as_ref().peer_ref.name().to_string(), "peer_uri" => peer.peer_id.as_ref().peer_ref.uri().to_string()),
                         );
 
                         for message in received.message.messages() {
@@ -349,7 +350,7 @@ impl ChainManager {
                                         if let Err(e) =
                                             current_head.update_remote_head(&message_current_head)
                                         {
-                                            warn!(log, "Failed to update remote head (by current branch)"; "reason" => format!("{}", e));
+                                            warn!(log, "Failed to update remote head (by current branch)"; "reason" => e);
                                         }
 
                                         // schedule to download missing branch blocks
@@ -399,30 +400,26 @@ impl ChainManager {
                                     let block_header_with_hash =
                                         BlockHeaderWithHash::new(message.block_header().clone())?;
 
-                                    let was_queued = {
-                                        peer.queued_block_headers2
-                                            .lock()
-                                            .map_err(StateError::from)?
-                                            .remove(&block_header_with_hash.hash)
-                                    };
+                                    // check, if we requested data from this peer
+                                    if let Some(requested_data) =
+                                        chain_state.requester().block_header_received(
+                                            &block_header_with_hash.hash,
+                                            peer,
+                                            &log,
+                                        )?
+                                    {
+                                        // now handle received header
+                                        Self::process_downloaded_header(
+                                            block_header_with_hash,
+                                            peer,
+                                            stats,
+                                            chain_state,
+                                            shell_channel,
+                                            &log,
+                                        )?;
 
-                                    match was_queued {
-                                        true => {
-                                            // TODO: TE-369 - peers stats
-                                            peer.block_response_last = Instant::now();
-
-                                            Self::process_downloaded_header(
-                                                block_header_with_hash,
-                                                peer,
-                                                stats,
-                                                chain_state,
-                                                shell_channel,
-                                                &log,
-                                            )?;
-                                        }
-                                        false => {
-                                            warn!(log, "Received unexpected block header"; "block_header_hash" => block_header_with_hash.hash.to_base58_check());
-                                        }
+                                        // explicit drop (not needed)
+                                        drop(requested_data);
                                     }
                                 }
                                 PeerMessage::GetBlockHeaders(message) => {
@@ -655,7 +652,7 @@ impl ChainManager {
                                             if let Err(e) = current_head
                                                 .update_remote_head(&message_current_head)
                                             {
-                                                warn!(log, "Failed to update remote head (by current head)"; "reason" => format!("{}", e));
+                                                warn!(log, "Failed to update remote head (by current head)"; "reason" => e);
                                             }
 
                                             // here we accept head, which also means that we know predecessor
@@ -1490,6 +1487,7 @@ impl
             operations_storage: Box::new(OperationsStorage::new(&persistent_storage)),
             mempool_storage: MempoolStorage::new(&persistent_storage),
             chain_state: BlockchainState::new(
+                DataRequesterRef::new(DataRequester::new(block_applier.clone())),
                 &persistent_storage,
                 block_applier,
                 shell_channel,
@@ -1627,7 +1625,7 @@ impl Receive<LogStats> for ChainManager {
         let (local, local_level, local_fitness) = match self.current_head.local_debug_info() {
             Ok(result) => result,
             Err(e) => {
-                warn!(ctx.system.log(), "Failed to collect local head debug info"; "reason" => format!("{}", e));
+                warn!(ctx.system.log(), "Failed to collect local head debug info"; "reason" => e);
                 (
                     "-failed-to-collect-".to_string(),
                     0,
@@ -1639,7 +1637,7 @@ impl Receive<LogStats> for ChainManager {
         let (remote, remote_level, remote_fitness) = match self.current_head.remote_debug_info() {
             Ok(result) => result,
             Err(e) => {
-                warn!(ctx.system.log(), "Failed to collect local head debug info"; "reason" => format!("{}", e));
+                warn!(ctx.system.log(), "Failed to collect local head debug info"; "reason" => e);
                 (
                     "-failed-to-collect-".to_string(),
                     0,
@@ -1722,8 +1720,18 @@ impl Receive<LogStats> for ChainManager {
                 // "queued_block_operations" => peer.queued_block_operations.len(),
                 "current_head_request_secs" => peer.current_head_request_last.elapsed().as_secs(),
                 "current_head_response_secs" => peer.current_head_response_last.elapsed().as_secs(),
-                "block_request_secs" => peer.block_request_last.elapsed().as_secs(),
-                "block_response_secs" => peer.block_response_last.elapsed().as_secs(),
+                "block_request_secs" => {
+                    match peer.queues.block_request_last.try_read() {
+                        Ok(block_request_last) => format!("{}", block_request_last.elapsed().as_secs()),
+                        _ =>  "-failed-to-collect-".to_string(),
+                    }
+                },
+                "block_response_secs" => {
+                    match peer.queues.block_response_last.try_read() {
+                        Ok(block_response_last) => format!("{}", block_response_last.elapsed().as_secs()),
+                        _ =>  "-failed-to-collect-".to_string(),
+                    }
+                },
                 "block_operations_request_secs" => peer.block_operations_request_last.elapsed().as_secs(),
                 "block_operations_response_secs" => peer.block_operations_response_last.elapsed().as_secs(),
                 "mempool_operations_request_secs" => peer.mempool_operations_request_last.elapsed().as_secs(),
@@ -1746,7 +1754,6 @@ impl Receive<DisconnectStalledPeers> for ChainManager {
         self.peers.iter()
             .for_each(|(uri, state)| {
                 let current_head_response_pending = state.current_head_request_last > state.current_head_response_last;
-                let block_response_pending = state.block_request_last > state.block_response_last;
                 let block_operations_response_pending = state.block_operations_request_last > state.block_operations_response_last;
                 let mempool_operations_response_pending = state.mempool_operations_request_last > state.mempool_operations_response_last;
                 let known_higher_head = match state.current_head_level {
@@ -1761,7 +1768,25 @@ impl Receive<DisconnectStalledPeers> for ChainManager {
                     None => true,
                 };
 
-                let should_disconnect = if current_head_response_pending && (state.current_head_request_last - state.current_head_response_last > msg.silent_peer_timeout) {
+                // chcek penalty peer for not responding to our requests on time
+                let block_response_pending = match state.is_block_response_pending(msg.silent_peer_timeout) {
+                    Ok(block_response_pending) => {
+                        warn!(ctx.system.log(), "Peer did not respond to our request for block on time";
+                                                "silent_peer_timeout_exceeded" => format!("{:?}", msg.silent_peer_timeout),
+                                                "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
+                        block_response_pending
+                    },
+                    Err(e) => {
+                        warn!(ctx.system.log(), "Failed to resolve, if block response pending, for peer (so behave as ok)";
+                                                "reason" => format!("{}", e),
+                                                "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
+                        false
+                    }
+                };
+
+                let should_disconnect = if block_response_pending {
+                    true
+                } else if current_head_response_pending && (state.current_head_request_last - state.current_head_response_last > msg.silent_peer_timeout) {
                     warn!(ctx.system.log(), "Peer did not respond to our request for current_head on time"; "request_secs" => state.current_head_request_last.elapsed().as_secs(), "response_secs" => state.current_head_response_last.elapsed().as_secs(),
                                             "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
                     true
@@ -1793,18 +1818,10 @@ impl Receive<DisconnectStalledPeers> for ChainManager {
                                             },
                                             "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
                     true
-                } else if block_response_pending && (state.block_request_last - state.block_response_last > msg.silent_peer_timeout) {
-                    warn!(ctx.system.log(), "Peer did not respond to our request for block on time"; "request_secs" => state.block_request_last.elapsed().as_secs(), "response_secs" => state.block_response_last.elapsed().as_secs(),
-                                            "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
-                    true
                 } else if block_operations_response_pending && (state.block_operations_request_last - state.block_operations_response_last > msg.silent_peer_timeout) {
                     warn!(ctx.system.log(), "Peer did not respond to our request for block operations on time"; "request_secs" => state.block_operations_request_last.elapsed().as_secs(), "response_secs" => state.block_operations_response_last.elapsed().as_secs(),
                                             "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
                     true
-                    // } else if block_response_pending && !state.queued_block_headers.is_empty() && (state.block_response_last.elapsed() > msg.silent_peer_timeout) {
-                    //     warn!(ctx.system.log(), "Peer is not providing requested blocks"; "queued_count" => state.queued_block_headers.len(), "response_secs" => state.block_response_last.elapsed().as_secs(),
-                    //                             "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
-                    //     true
                     // } else if block_operations_response_pending && !state.queued_block_operations.is_empty() && (state.block_operations_response_last.elapsed() > msg.silent_peer_timeout) {
                     //     warn!(ctx.system.log(), "Peer is not providing requested block operations"; "queued_count" => state.queued_block_operations.len(), "response_secs" => state.block_operations_response_last.elapsed().as_secs(),
                     //                             "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());

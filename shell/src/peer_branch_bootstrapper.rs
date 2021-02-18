@@ -14,7 +14,7 @@ use networking::PeerId;
 use storage::{BlockMetaStorage, BlockMetaStorageReader, OperationsMetaStorage};
 use tezos_messages::p2p::encoding::block_header::Level;
 use tezos_messages::p2p::encoding::prelude::{
-    GetBlockHeadersMessage, GetOperationsForBlocksMessage, OperationsForBlock, PeerMessageResponse,
+    GetOperationsForBlocksMessage, OperationsForBlock, PeerMessageResponse,
 };
 
 use crate::chain_feeder::{ApplyCompletedBlock, ChainFeederRef};
@@ -23,6 +23,8 @@ use crate::chain_feeder_channel::{
 };
 use crate::shell_channel::{ShellChannelMsg, ShellChannelRef, ShellChannelTopic};
 use crate::state::bootstrap_state::{BootstrapState, InnerBlockState};
+use crate::state::data_requester::DataRequesterRef;
+use crate::state::peer_state::DataQueues;
 use crate::state::synchronization_state::PeerBranchSynchronizationDone;
 use crate::state::{MissingOperations, StateError};
 use crate::subscription::subscribe_to_actor_terminated;
@@ -33,6 +35,9 @@ const MAX_TRIES_FOR_LOOPING_EXISTING_DATA_IN_ONE_RUN: usize = 5000;
 const SCHEDULE_ONE_TIMER_NO_DATA_DELAY: Duration = Duration::from_secs(5);
 const SCHEDULE_ONE_TIMER_DATA_DELAY: Duration = Duration::from_millis(10);
 const PROCESS_BLOCK_APPLY_INTERVAL: Duration = Duration::from_secs(20);
+
+/// We can controll speedup of downloading blocks from network
+const MAX_BOOTSTRAP_INTERVAL_AHEAD_LOOK_COUNT: i8 = 2;
 
 /// After this timeout peer will be disconnected if no activity is done on any pipeline
 /// So if peer does not change any branch bootstrap, we will disconnect it
@@ -131,19 +136,20 @@ pub struct BlockAlreadyApplied {
 )]
 pub struct PeerBranchBootstrapper {
     peer: Arc<PeerId>,
+    peer_queues: Arc<DataQueues>,
+    queued_block_headers: Arc<Mutex<HashSet<Arc<BlockHash>>>>,
+    queued_block_operations: Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
+    queued_block_headers_for_apply: HashMap<Arc<BlockHash>, Instant>,
 
     shell_channel: ShellChannelRef,
     chain_feeder_channel: ChainFeederChannelRef,
     block_meta_storage: BlockMetaStorage,
     operations_meta_storage: OperationsMetaStorage,
 
+    requester: DataRequesterRef,
     block_applier: ChainFeederRef,
 
     bootstrap_state: Vec<BootstrapState>,
-    queued_block_headers: Arc<Mutex<HashSet<Arc<BlockHash>>>>,
-    queued_block_operations: Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
-    queued_block_headers_for_apply: HashMap<Arc<BlockHash>, Instant>,
-
     empty_bootstrap_state: Option<Instant>,
     // TODO: TE-369 - rate limiter
     // Indicates that we triggered check_chain_completeness
@@ -159,6 +165,8 @@ impl PeerBranchBootstrapper {
     pub fn actor(
         sys: &ActorSystem,
         peer: Arc<PeerId>,
+        peer_queues: Arc<DataQueues>,
+        requester: DataRequesterRef,
         queued_block_headers: Arc<Mutex<HashSet<Arc<BlockHash>>>>,
         queued_block_operations: Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
         shell_channel: ShellChannelRef,
@@ -171,6 +179,8 @@ impl PeerBranchBootstrapper {
             &format!("{}-branch-bootstrap", &peer.peer_ref.name()),
             Props::new_args((
                 peer,
+                peer_queues,
+                requester,
                 queued_block_headers,
                 queued_block_operations,
                 shell_channel,
@@ -190,10 +200,11 @@ impl PeerBranchBootstrapper {
     ) {
         let PeerBranchBootstrapper {
             peer,
+            peer_queues,
             bootstrap_state,
+            requester,
             block_meta_storage,
             operations_meta_storage,
-            queued_block_headers,
             queued_block_operations,
             ..
         } = self;
@@ -203,8 +214,9 @@ impl PeerBranchBootstrapper {
             // schedule next block downloading
             was_scheduled |= schedule_block_downloading(
                 peer,
+                peer_queues,
                 bootstrap,
-                queued_block_headers,
+                requester,
                 block_meta_storage,
                 operations_meta_storage,
                 log,
@@ -306,6 +318,8 @@ impl PeerBranchBootstrapper {
 impl
     ActorFactoryArgs<(
         Arc<PeerId>,
+        Arc<DataQueues>,
+        DataRequesterRef,
         Arc<Mutex<HashSet<Arc<BlockHash>>>>,
         Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
         ShellChannelRef,
@@ -318,6 +332,8 @@ impl
     fn create_args(
         (
             peer,
+            peer_queues,
+            requester,
             queued_block_headers,
             queued_block_operations,
             shell_channel,
@@ -327,6 +343,8 @@ impl
             operations_meta_storage,
         ): (
             Arc<PeerId>,
+            Arc<DataQueues>,
+            DataRequesterRef,
             Arc<Mutex<HashSet<Arc<BlockHash>>>>,
             Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
             ShellChannelRef,
@@ -338,6 +356,8 @@ impl
     ) -> Self {
         PeerBranchBootstrapper {
             peer,
+            peer_queues,
+            requester,
             queued_block_headers,
             queued_block_operations,
             queued_block_headers_for_apply: Default::default(),
@@ -511,26 +531,13 @@ impl Receive<UpdateBlockState> for PeerBranchBootstrapper {
         msg: UpdateBlockState,
         _: Option<BasicActorRef>,
     ) {
-        let PeerBranchBootstrapper {
-            bootstrap_state,
-            block_meta_storage,
-            operations_meta_storage,
-            ..
-        } = self;
-
-        bootstrap_state
-            .iter_mut()
-            .for_each(|bootstrap| {
-                let block = msg.block_hash.clone();
-                if let Err(e) = update_block_state(
-                    &msg,
-                    bootstrap,
-                    block_meta_storage,
-                    operations_meta_storage,
-                ) {
-                    error!(ctx.system.log(), "Failed to process downloaded block header"; "block" => block.to_base58_check(), "reason" => format!("{}", e));
-                }
-            });
+        self.bootstrap_state.iter_mut().for_each(|bootstrap| {
+            bootstrap.block_downloaded(
+                &msg.block_hash,
+                &msg.new_state,
+                msg.predecessor_block_hash.clone(),
+            )
+        });
 
         self.process_data_download(ctx, ctx.myself(), &ctx.system.log());
         self.process_block_apply(ctx, ctx.myself(), &ctx.system.log());
@@ -642,133 +649,78 @@ impl Receive<DisconnectStalledBootstraps> for PeerBranchBootstrapper {
                 "peer_id" => self.peer.peer_id_marker.clone(), "peer_ip" => self.peer.peer_address.to_string(), "peer" => self.peer.peer_ref.name(), "peer_uri" => self.peer.peer_ref.uri().to_string(),
             );
 
+            // TODO: unsubscribe from channel ?
+            // TODO: plus pridat stop IF na spracovanie akcii
             ctx.system.stop(ctx.myself());
             ctx.system.stop(self.peer.peer_ref.clone());
         }
     }
 }
 
-fn update_block_state(
-    new_block_state: &UpdateBlockState,
-    bootstrap: &mut BootstrapState,
-    block_meta_storage: &mut BlockMetaStorage,
-    operations_meta_storage: &mut OperationsMetaStorage,
-) -> Result<(), StateError> {
-    bootstrap.block_downloaded(
-        &new_block_state.block_hash,
-        &new_block_state.new_state,
-        &new_block_state.predecessor_block_hash,
-        |bh| -> Result<Option<InnerBlockState>, StateError> {
-            if let Some(metadata) = block_meta_storage.get(&bh)? {
-                Ok(Some(InnerBlockState {
+fn block_metadata(
+    block_hash: &BlockHash,
+    block_meta_storage: &BlockMetaStorage,
+    operations_meta_storage: &OperationsMetaStorage,
+) -> Result<Option<(InnerBlockState, Arc<BlockHash>)>, StateError> {
+    Ok(match block_meta_storage.get(block_hash)? {
+        Some(metadata) => match metadata.predecessor() {
+            Some(predecessor) => Some((
+                InnerBlockState {
                     block_downloaded: metadata.is_downloaded(),
                     applied: metadata.is_applied(),
-                    operations_downloaded: operations_meta_storage.is_complete(&bh)?,
-                }))
-            } else {
-                Ok(None)
-            }
+                    operations_downloaded: operations_meta_storage.is_complete(block_hash)?,
+                },
+                Arc::new(predecessor.clone()),
+            )),
+            None => None,
         },
-    )
+        None => None,
+    })
 }
 
 fn schedule_block_downloading(
-    peer: &mut Arc<PeerId>,
+    peer: &Arc<PeerId>,
+    peer_queues: &DataQueues,
     bootstrap: &mut BootstrapState,
-    queued_block_headers: &mut Arc<Mutex<HashSet<Arc<BlockHash>>>>,
-    block_meta_storage: &mut BlockMetaStorage,
-    operations_meta_storage: &mut OperationsMetaStorage,
+    requester: &DataRequesterRef,
+    block_meta_storage: &BlockMetaStorage,
+    operations_meta_storage: &OperationsMetaStorage,
     log: &Logger,
 ) -> bool {
-    // get first non downloaded header (check also storage)
-    let mut max_tries = 0;
-
-    let next_block_to_download = loop {
-        let block = bootstrap.next_block_to_download();
-        max_tries += 1;
-        // this means we are looping through existing data, which somebody downloaded before, so we wait for maybe applied
-        if max_tries > MAX_TRIES_FOR_LOOPING_EXISTING_DATA_IN_ONE_RUN {
-            break None;
-        }
-
-        match block {
-            Some(block) => {
-                // check metadata, if any other peer processed this block
-                match block_meta_storage.get(&block) {
-                    Ok(Some(metadata)) => match metadata.predecessor() {
-                        Some(predecessor) => {
-                            let operations_downloaded =
-                                match operations_meta_storage.is_complete(&block) {
-                                    Ok(is_complete) => is_complete,
-                                    _ => false,
-                                };
-
-                            let msg = UpdateBlockState::new(
-                                block,
-                                Arc::new(predecessor.clone()),
-                                InnerBlockState {
-                                    block_downloaded: true,
-                                    applied: metadata.is_applied(),
-                                    operations_downloaded,
-                                },
-                            );
-
-                            if let Err(e) = update_block_state(
-                                &msg,
-                                bootstrap,
-                                block_meta_storage,
-                                operations_meta_storage,
-                            ) {
-                                error!(log, "Failed to process block header"; "block" => msg.block_hash.to_base58_check(), "reason" => format!("{}", e));
-                                // stop downloading for this time
-                                break None;
-                            }
-
-                            // lets loop and check another block
-                        }
-                        None => {
-                            // we dont have this header yet
-                            break Some(block);
-                        }
-                    },
-                    Ok(None) => {
-                        // we dont have this header yet
-                        break Some(block);
-                    }
-                    Err(e) => {
-                        error!(log, "Failed to read block header metadata"; "block" => block.to_base58_check(), "reason" => e);
-                        break None;
-                    }
-                }
-            }
-            None => break None,
+    // get peer's queue available capacity
+    let available_queue_capacity = match peer_queues.available_queued_block_headers_capacity() {
+        Ok(capacity) => capacity,
+        Err(e) => {
+            warn!(log, "Failed to get available queue capacity for peer (so return 0)"; "reason" => e,
+                        "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
+            0
         }
     };
 
-    if let Some(block) = next_block_to_download {
-        let can_be_scheduled = {
-            match queued_block_headers.lock() {
-                Ok(mut queued_block_headers) => {
-                    if queued_block_headers.len() < MAX_QUEUED_ITEMS {
-                        queued_block_headers.insert(block.clone())
-                    } else {
-                        false
-                    }
-                }
-                Err(_) => false,
-            }
-        };
-        if can_be_scheduled {
-            tell_peer(
-                GetBlockHeadersMessage::new(vec![block.as_ref().clone()]).into(),
-                peer,
-            );
 
-            return true;
+    // get blocks to download
+    match bootstrap.find_next_blocks_to_download(
+        available_queue_capacity,
+        MAX_BOOTSTRAP_INTERVAL_AHEAD_LOOK_COUNT,
+        |block_hash| block_metadata(block_hash, block_meta_storage, operations_meta_storage),
+    ) {
+        Ok(blocks_to_download) => {
+            // try schedule
+            match requester.fetch_block_headers(blocks_to_download, peer, peer_queues, log) {
+                Ok(was_scheduled) => was_scheduled,
+                Err(e) => {
+                    warn!(log, "Failed to schedule blocks for peer"; "reason" => e,
+                        "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            warn!(log, "Failed to find blocks for scheduling for peer"; "reason" => e,
+                        "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
+            false
         }
     }
-
-    false
 }
 
 fn schedule_operations_downloading(
@@ -907,7 +859,7 @@ fn schedule_block_applying(
                         break None;
                     }
                     Err(e) => {
-                        error!(log, "Failed to read block header metadata"; "block" => block.to_base58_check(), "reason" => format!("{}", e));
+                        error!(log, "Failed to read block header metadata"; "block" => block.to_base58_check(), "reason" => e);
                         break None;
                     }
                 }

@@ -106,7 +106,7 @@ impl CheckBlocksForApply {
 }
 
 /// Message commands [`ChainFeeder`] to apply block.
-struct ApplyBlock {
+pub(crate) struct ApplyBlock {
     envelope: ApplyCompletedBlock,
     chain_feeder: ChainFeederRef,
     request: ApplyBlockRequest,
@@ -127,7 +127,7 @@ impl ApplyBlock {
 }
 
 /// Internal queue commands
-enum Event {
+pub(crate) enum Event {
     ApplyBlock(ApplyBlock),
     ShuttingDown,
 }
