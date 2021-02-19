@@ -2,20 +2,16 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use riker::actors::*;
 use slog::{debug, error, warn, Logger};
 
 use crypto::hash::{BlockHash, ChainId};
-use networking::p2p::peer::SendMessage;
 use networking::PeerId;
 use storage::{BlockMetaStorage, BlockMetaStorageReader, OperationsMetaStorage};
 use tezos_messages::p2p::encoding::block_header::Level;
-use tezos_messages::p2p::encoding::prelude::{
-    GetOperationsForBlocksMessage, OperationsForBlock, PeerMessageResponse,
-};
 
 use crate::chain_feeder::{ApplyCompletedBlock, ChainFeederRef};
 use crate::chain_feeder_channel::{
@@ -26,11 +22,10 @@ use crate::state::bootstrap_state::{BootstrapState, InnerBlockState};
 use crate::state::data_requester::DataRequesterRef;
 use crate::state::peer_state::DataQueues;
 use crate::state::synchronization_state::PeerBranchSynchronizationDone;
-use crate::state::{MissingOperations, StateError};
+use crate::state::StateError;
 use crate::subscription::subscribe_to_actor_terminated;
 
 const MAX_BOOTSTRAP_BRANCHES_PER_PEER: usize = 2;
-const MAX_QUEUED_ITEMS: usize = 10;
 const MAX_TRIES_FOR_LOOPING_EXISTING_DATA_IN_ONE_RUN: usize = 5000;
 const SCHEDULE_ONE_TIMER_NO_DATA_DELAY: Duration = Duration::from_secs(5);
 const SCHEDULE_ONE_TIMER_DATA_DELAY: Duration = Duration::from_millis(10);
@@ -137,8 +132,6 @@ pub struct BlockAlreadyApplied {
 pub struct PeerBranchBootstrapper {
     peer: Arc<PeerId>,
     peer_queues: Arc<DataQueues>,
-    queued_block_headers: Arc<Mutex<HashSet<Arc<BlockHash>>>>,
-    queued_block_operations: Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
     queued_block_headers_for_apply: HashMap<Arc<BlockHash>, Instant>,
 
     shell_channel: ShellChannelRef,
@@ -167,8 +160,6 @@ impl PeerBranchBootstrapper {
         peer: Arc<PeerId>,
         peer_queues: Arc<DataQueues>,
         requester: DataRequesterRef,
-        queued_block_headers: Arc<Mutex<HashSet<Arc<BlockHash>>>>,
-        queued_block_operations: Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
         shell_channel: ShellChannelRef,
         chain_feeder_channel: ChainFeederChannelRef,
         block_applier: ChainFeederRef,
@@ -181,8 +172,6 @@ impl PeerBranchBootstrapper {
                 peer,
                 peer_queues,
                 requester,
-                queued_block_headers,
-                queued_block_operations,
                 shell_channel,
                 chain_feeder_channel,
                 block_applier,
@@ -205,7 +194,6 @@ impl PeerBranchBootstrapper {
             requester,
             block_meta_storage,
             operations_meta_storage,
-            queued_block_operations,
             ..
         } = self;
 
@@ -225,8 +213,9 @@ impl PeerBranchBootstrapper {
             // schedule next block downloading
             was_scheduled |= schedule_operations_downloading(
                 peer,
+                peer_queues,
                 bootstrap,
-                queued_block_operations,
+                requester,
                 operations_meta_storage,
                 log,
             );
@@ -320,8 +309,6 @@ impl
         Arc<PeerId>,
         Arc<DataQueues>,
         DataRequesterRef,
-        Arc<Mutex<HashSet<Arc<BlockHash>>>>,
-        Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
         ShellChannelRef,
         ChainFeederChannelRef,
         ChainFeederRef,
@@ -334,8 +321,6 @@ impl
             peer,
             peer_queues,
             requester,
-            queued_block_headers,
-            queued_block_operations,
             shell_channel,
             chain_feeder_channel,
             block_applier,
@@ -345,8 +330,6 @@ impl
             Arc<PeerId>,
             Arc<DataQueues>,
             DataRequesterRef,
-            Arc<Mutex<HashSet<Arc<BlockHash>>>>,
-            Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
             ShellChannelRef,
             ChainFeederChannelRef,
             ChainFeederRef,
@@ -358,8 +341,6 @@ impl
             peer,
             peer_queues,
             requester,
-            queued_block_headers,
-            queued_block_operations,
             queued_block_headers_for_apply: Default::default(),
             bootstrap_state: Default::default(),
             shell_channel,
@@ -554,25 +535,13 @@ impl Receive<UpdateOperationsState> for PeerBranchBootstrapper {
         _: Option<BasicActorRef>,
     ) {
         let PeerBranchBootstrapper {
-            bootstrap_state,
-            queued_block_operations,
-            ..
+            bootstrap_state, ..
         } = self;
 
         // check pipelines
         bootstrap_state.iter_mut().for_each(|bootstrap| {
             bootstrap.block_operations_downloaded(&msg.block_hash);
         });
-
-        // now remove from queue
-        match queued_block_operations.lock() {
-            Ok(mut queued_block_operations) => {
-                let _ = queued_block_operations.remove(&msg.block_hash);
-            }
-            Err(e) => {
-                error!(ctx.system.log(), "Failed to lock queued_block_operations"; "reason" => format!("{}", e))
-            }
-        };
 
         // kick another processing
         self.process_data_download(ctx, ctx.myself(), &ctx.system.log());
@@ -630,22 +599,7 @@ impl Receive<DisconnectStalledBootstraps> for PeerBranchBootstrapper {
 
         // if stalled, just disconnect peer
         if is_stalled {
-            // TODO: TE-369 - peers stats
-            let queued_block_headers = self
-                .queued_block_headers
-                .lock()
-                .expect("Failed to lock")
-                .len();
-            let queued_block_operations = self
-                .queued_block_operations
-                .lock()
-                .expect("Failed to lock")
-                .len();
-
             warn!(ctx.system.log(), "Disconnecting peer, because of stalled bootstrap pipeline";
-                "queued_block_headers_for_apply" => format!("{:?}", &self.queued_block_headers_for_apply),
-                "queued_block_headers" => queued_block_headers,
-                "queued_block_operations" => queued_block_operations,
                 "peer_id" => self.peer.peer_id_marker.clone(), "peer_ip" => self.peer.peer_address.to_string(), "peer" => self.peer.peer_ref.name(), "peer_uri" => self.peer.peer_ref.uri().to_string(),
             );
 
@@ -687,16 +641,15 @@ fn schedule_block_downloading(
     operations_meta_storage: &OperationsMetaStorage,
     log: &Logger,
 ) -> bool {
-    // get peer's queue available capacity
+    // get peer's queue available capacity for blocks
     let available_queue_capacity = match peer_queues.available_queued_block_headers_capacity() {
         Ok(capacity) => capacity,
         Err(e) => {
-            warn!(log, "Failed to get available queue capacity for peer (so return 0)"; "reason" => e,
+            warn!(log, "Failed to get available blocks queue capacity for peer (so return 0)"; "reason" => e,
                         "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
             0
         }
     };
-
 
     // get blocks to download
     match bootstrap.find_next_blocks_to_download(
@@ -725,103 +678,52 @@ fn schedule_block_downloading(
 
 fn schedule_operations_downloading(
     peer: &mut Arc<PeerId>,
+    peer_queues: &DataQueues,
     bootstrap: &mut BootstrapState,
-    queued_block_operations: &mut Arc<Mutex<HashMap<BlockHash, MissingOperations>>>,
+    requester: &DataRequesterRef,
     operations_meta_storage: &mut OperationsMetaStorage,
     log: &Logger,
 ) -> bool {
-    let mut max_tries = 0;
-    // get first non downloaded header (check also storage)
-    let next_block_to_download: Option<(Arc<BlockHash>, HashSet<u8>)> = loop {
-        max_tries += 1;
-        // this means we are looping through existing data, which somebody downloaded before, so we wait for maybe applied
-        if max_tries > MAX_TRIES_FOR_LOOPING_EXISTING_DATA_IN_ONE_RUN {
-            break None;
-        }
-
-        let block = bootstrap.next_block_operations_to_download();
-
-        match block {
-            Some(block) => {
-                // check metadata, if any other peer processed this block
-                match operations_meta_storage.get(&block) {
-                    Ok(Some(metadata)) => {
-                        // if completed, lets continue
-                        if metadata.is_complete() {
-                            // update current state and continue
-                            bootstrap.block_operations_downloaded(&block);
-                        } else {
-                            if let Some(missing_validation_passes) =
-                                metadata.get_missing_validation_passes()
-                            {
-                                break Some((block, missing_validation_passes));
-                            } else {
-                                break None;
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        // missing metadata for operations, which are created when inserting header
-                        break None;
-                    }
-                    Err(e) => {
-                        error!(log, "Failed to read block header metadata"; "block" => block.to_base58_check(), "reason" => e);
-                        break None;
-                    }
-                }
-            }
-            None => break None,
+    // get peer's queue available capacity for operations
+    let available_queue_capacity = match peer_queues.available_queued_block_operations_capacity() {
+        Ok(capacity) => capacity,
+        Err(e) => {
+            warn!(log, "Failed to get available operations queue capacity for peer (so return 0)"; "reason" => e,
+                        "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
+            0
         }
     };
 
-    if let Some((block, missing_validation_passes)) = next_block_to_download {
-        let can_be_scheduled = {
-            match queued_block_operations.lock() {
-                Ok(mut queued_block_operations) => {
-                    if queued_block_operations.len() < MAX_QUEUED_ITEMS {
-                        // we dont want to reschedule the same
-                        if !queued_block_operations.contains_key(block.as_ref()) {
-                            queued_block_operations
-                                .insert(
-                                    block.as_ref().clone(),
-                                    MissingOperations {
-                                        block_hash: block.as_ref().clone(),
-                                        history_order_priority: 0,
-                                        retries: 0,
-                                        validation_passes: missing_validation_passes
-                                            .iter()
-                                            .map(|vp| *vp as i8)
-                                            .collect(),
-                                    },
-                                )
-                                .is_none()
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                }
-                Err(_) => false,
-            }
-        };
-        if can_be_scheduled {
-            tell_peer(
-                GetOperationsForBlocksMessage::new(
-                    missing_validation_passes
-                        .into_iter()
-                        .map(|vp| OperationsForBlock::new(block.as_ref().clone(), vp as i8))
-                        .collect(),
-                )
-                .into(),
-                peer,
-            );
+    let ignored_blocks = HashSet::default();
 
-            return true;
+    // get blocks to download
+    match bootstrap.find_next_block_operations_to_download(
+        available_queue_capacity,
+        ignored_blocks,
+        MAX_BOOTSTRAP_INTERVAL_AHEAD_LOOK_COUNT,
+        |block_hash| {
+            operations_meta_storage
+                .is_complete(block_hash)
+                .map_err(StateError::from)
+        },
+    ) {
+        Ok(blocks_to_download) => {
+            // try schedule
+            match requester.fetch_block_operations(blocks_to_download, peer, peer_queues, log) {
+                Ok(was_scheduled) => was_scheduled,
+                Err(e) => {
+                    warn!(log, "Failed to schedule blocks for missing operations for peer"; "reason" => e,
+                        "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            warn!(log, "Failed to find blocks with missing operations for scheduling for peer"; "reason" => e,
+                        "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
+            false
         }
     }
-
-    false
 }
 
 fn schedule_block_applying(
@@ -903,8 +805,4 @@ fn schedule_block_applying(
             );
         }
     }
-}
-
-pub fn tell_peer(msg: Arc<PeerMessageResponse>, peer: &PeerId) {
-    peer.peer_ref.tell(SendMessage::new(msg), None);
 }

@@ -26,8 +26,8 @@ use storage::mempool_storage::MempoolOperationType;
 use storage::persistent::PersistentStorage;
 use storage::{
     BlockHeaderWithHash, BlockMetaStorage, BlockMetaStorageReader, BlockStorage,
-    BlockStorageReader, MempoolStorage, OperationsStorage, OperationsStorageReader, StorageError,
-    StorageInitInfo,
+    BlockStorageReader, MempoolStorage, OperationsMetaStorage, OperationsStorage,
+    OperationsStorageReader, StorageError, StorageInitInfo,
 };
 use tezos_identity::Identity;
 use tezos_messages::p2p::binary_message::MessageHash;
@@ -458,154 +458,45 @@ impl ChainManager {
                                     }
                                 }
                                 PeerMessage::OperationsForBlocks(operations) => {
-                                    let block_hash =
-                                        operations.operations_for_block().hash().clone();
-                                    let validation_pass =
-                                        operations.operations_for_block().validation_pass().clone();
+                                    if let Some(requested_data) =
+                                        chain_state.requester().block_operations_received(
+                                            operations.operations_for_block(),
+                                            peer,
+                                            &log,
+                                        )?
+                                    {
+                                        // update stats
+                                        stats.unseen_block_operations_last = Instant::now();
 
-                                    // check if we queued operation
-                                    let (was_queued, operation_was_expected) = {
-                                        let mut queued_block_operations2 = peer
-                                            .queued_block_operations2
-                                            .lock()
-                                            .map_err(StateError::from)?;
-                                        let queued_operations =
-                                            queued_block_operations2.get_mut(&block_hash);
-                                        match queued_operations {
-                                            Some(missing_operations) => {
-                                                // try dequeue
-                                                let operation_was_expected =
-                                                    missing_operations.validation_passes.remove(
-                                                        &operations
-                                                            .operations_for_block()
-                                                            .validation_pass(),
-                                                    );
+                                        // update operations state
+                                        let block_hash = operations.operations_for_block().hash();
+                                        if chain_state.process_block_operations_from_peer(
+                                            peer,
+                                            &block_hash,
+                                            &operations,
+                                        )? {
+                                            // TODO: TE-369 - is this necessery?
+                                            // notify others that new all operations for block were received
+                                            let block_meta = block_meta_storage
+                                                .get(&block_hash)?
+                                                .ok_or(StorageError::MissingKey)?;
 
-                                                // TODO: TE-386 - global queue for requested operations - we use this map for lazy/gracefull receiving
-                                                if let Some(missing_operations_for_blocks) = peer
-                                                    .missing_operations_for_blocks
-                                                    .get_mut(&block_hash)
-                                                {
-                                                    missing_operations_for_blocks.extend(
-                                                        &missing_operations.validation_passes,
-                                                    );
-                                                } else {
-                                                    if !missing_operations
-                                                        .validation_passes
-                                                        .is_empty()
-                                                    {
-                                                        let _ = peer
-                                                            .missing_operations_for_blocks
-                                                            .insert(
-                                                                block_hash.clone(),
-                                                                missing_operations
-                                                                    .validation_passes
-                                                                    .clone(),
-                                                            );
+                                            // notify others that new all operations for block were received
+                                            shell_channel.tell(
+                                                Publish {
+                                                    msg: AllBlockOperationsReceived {
+                                                        hash: block_hash.clone(),
+                                                        level: block_meta.level(),
                                                     }
-                                                }
-
-                                                (true, operation_was_expected)
-                                            }
-                                            None => (false, false),
+                                                    .into(),
+                                                    topic: ShellChannelTopic::ShellEvents.into(),
+                                                },
+                                                None,
+                                            );
                                         }
-                                    };
 
-                                    match was_queued {
-                                        true => {
-                                            if operation_was_expected {
-                                                peer.block_operations_response_last =
-                                                    Instant::now();
-
-                                                // update operations state
-                                                if chain_state.process_block_operations_from_peer(
-                                                    peer,
-                                                    &block_hash,
-                                                    &operations,
-                                                )? {
-                                                    // TODO: TE-369 - peers stats
-                                                    // update stats
-                                                    stats.unseen_block_operations_last =
-                                                        Instant::now();
-
-                                                    // TODO: TE-369 - is this necessery?
-                                                    // notify others that new all operations for block were received
-                                                    let block_meta = block_meta_storage
-                                                        .get(&block_hash)?
-                                                        .ok_or(StorageError::MissingKey)?;
-
-                                                    // notify others that new all operations for block were received
-                                                    shell_channel.tell(
-                                                        Publish {
-                                                            msg: AllBlockOperationsReceived {
-                                                                hash: block_hash.clone(),
-                                                                level: block_meta.level(),
-                                                            }
-                                                            .into(),
-                                                            topic: ShellChannelTopic::ShellEvents
-                                                                .into(),
-                                                        },
-                                                        None,
-                                                    );
-                                                }
-                                            } else {
-                                                // TODO: TE-386 - global queue for requested operations - we use this map for lazy/gracefull receiving
-                                                let was_expected =
-                                                    if let Some(missing_operations_for_blocks) =
-                                                        peer.missing_operations_for_blocks
-                                                            .get_mut(&block_hash)
-                                                    {
-                                                        let expected =
-                                                            missing_operations_for_blocks.remove(
-                                                                &operations
-                                                                    .operations_for_block()
-                                                                    .validation_pass(),
-                                                            );
-                                                        if missing_operations_for_blocks.is_empty()
-                                                        {
-                                                            peer.missing_operations_for_blocks
-                                                                .remove(&block_hash);
-                                                        }
-                                                        expected
-                                                    } else {
-                                                        false
-                                                    };
-                                                if !was_expected {
-                                                    warn!(log, "Received unexpected validation pass";
-                                                           "validation_pass" => operations.operations_for_block().validation_pass(), "block_header_hash" => block_hash.to_base58_check(),
-                                                           "peer_id" => peer.peer_id.peer_id_marker.clone(), "peer_ip" => peer.peer_id.peer_address.to_string(), "peer" => peer.peer_id.peer_ref.name(), "peer_uri" => peer.peer_id.peer_ref.uri().to_string());
-                                                    ctx.system.stop(received.peer.clone());
-                                                }
-                                            }
-                                        }
-                                        false => {
-                                            // TODO: TE-386 - global queue for requested operations - we use this map for lazy/gracefull receiving
-                                            let was_expected =
-                                                if let Some(missing_operations_for_blocks) = peer
-                                                    .missing_operations_for_blocks
-                                                    .get_mut(&block_hash)
-                                                {
-                                                    let expected = missing_operations_for_blocks
-                                                        .remove(
-                                                            &operations
-                                                                .operations_for_block()
-                                                                .validation_pass(),
-                                                        );
-                                                    if missing_operations_for_blocks.is_empty() {
-                                                        peer.missing_operations_for_blocks
-                                                            .remove(&block_hash);
-                                                    }
-                                                    expected
-                                                } else {
-                                                    false
-                                                };
-                                            if !was_expected {
-                                                warn!(log, "Received unexpected operations";
-                                                       "validation_pass" => validation_pass, "block_header_hash" => block_hash.to_base58_check(),
-                                                       "peer_id" => peer.peer_id.peer_id_marker.clone(), "peer_ip" => peer.peer_id.peer_address.to_string(), "peer" => peer.peer_id.peer_ref.name(), "peer_uri" => peer.peer_id.peer_ref.uri().to_string());
-                                                ctx.system.stop(received.peer.clone());
-                                            }
-                                        }
+                                        // explicit drop (not needed)
+                                        drop(requested_data)
                                     }
                                 }
                                 PeerMessage::GetOperationsForBlocks(message) => {
@@ -666,6 +557,26 @@ impl ChainManager {
                                             {
                                                 history.push(cur.block_hash().clone());
                                             }
+
+                                            // we need to simulate scheduling, so we add
+                                            let was_queued = if peer
+                                                .queues
+                                                .available_queued_block_headers_capacity()?
+                                                > 0
+                                            {
+                                                if let Ok(mut queue) =
+                                                    peer.queues.queued_block_headers.lock()
+                                                {
+                                                    queue.insert(Arc::new(
+                                                        message_current_head.hash.clone(),
+                                                    ))
+                                                } else {
+                                                    false
+                                                }
+                                            } else {
+                                                false
+                                            };
+
                                             chain_state.schedule_history_bootstrap(
                                                 &ctx.system,
                                                 peer,
@@ -673,27 +584,28 @@ impl ChainManager {
                                                 history,
                                             )?;
 
-                                            // we need to simulate scheduling, so we add
-                                            let is_scheduled = {
-                                                peer.queued_block_headers2
-                                                    .lock()
-                                                    .map_err(StateError::from)?
-                                                    .insert(Arc::new(
-                                                        message_current_head.hash.clone(),
-                                                    ))
-                                            };
-
                                             // if scheduled, we can proces it directly, if not, we will wait scheduled bootstrap
-                                            if is_scheduled {
-                                                // process downloaded block directlly
-                                                Self::process_downloaded_header(
-                                                    message_current_head,
-                                                    peer,
-                                                    stats,
-                                                    chain_state,
-                                                    shell_channel,
-                                                    &log,
-                                                )?;
+                                            if was_queued {
+                                                if let Some(requested_data) =
+                                                    chain_state.requester().block_header_received(
+                                                        &message_current_head.hash,
+                                                        peer,
+                                                        &log,
+                                                    )?
+                                                {
+                                                    // process downloaded block directly
+                                                    Self::process_downloaded_header(
+                                                        message_current_head,
+                                                        peer,
+                                                        stats,
+                                                        chain_state,
+                                                        shell_channel,
+                                                        &log,
+                                                    )?;
+
+                                                    // explicit drop (not needed)
+                                                    drop(requested_data);
+                                                }
                                             }
 
                                             // schedule mempool download
@@ -1487,7 +1399,10 @@ impl
             operations_storage: Box::new(OperationsStorage::new(&persistent_storage)),
             mempool_storage: MempoolStorage::new(&persistent_storage),
             chain_state: BlockchainState::new(
-                DataRequesterRef::new(DataRequester::new(block_applier.clone())),
+                DataRequesterRef::new(DataRequester::new(
+                    OperationsMetaStorage::new(&persistent_storage),
+                    block_applier.clone(),
+                )),
                 &persistent_storage,
                 block_applier,
                 shell_channel,
@@ -1722,18 +1637,28 @@ impl Receive<LogStats> for ChainManager {
                 "current_head_response_secs" => peer.current_head_response_last.elapsed().as_secs(),
                 "block_request_secs" => {
                     match peer.queues.block_request_last.try_read() {
-                        Ok(block_request_last) => format!("{}", block_request_last.elapsed().as_secs()),
+                        Ok(request_last) => format!("{}", request_last.elapsed().as_secs()),
                         _ =>  "-failed-to-collect-".to_string(),
                     }
                 },
                 "block_response_secs" => {
                     match peer.queues.block_response_last.try_read() {
-                        Ok(block_response_last) => format!("{}", block_response_last.elapsed().as_secs()),
+                        Ok(response_last) => format!("{}", response_last.elapsed().as_secs()),
                         _ =>  "-failed-to-collect-".to_string(),
                     }
                 },
-                "block_operations_request_secs" => peer.block_operations_request_last.elapsed().as_secs(),
-                "block_operations_response_secs" => peer.block_operations_response_last.elapsed().as_secs(),
+                "block_operations_request_secs" => {
+                    match peer.queues.block_operations_request_last.try_read() {
+                        Ok(request_last) => format!("{}", request_last.elapsed().as_secs()),
+                        _ =>  "-failed-to-collect-".to_string(),
+                    }
+                },
+                "block_operations_response_secs" => {
+                    match peer.queues.block_operations_response_last.try_read() {
+                        Ok(response_last) => format!("{}", response_last.elapsed().as_secs()),
+                        _ =>  "-failed-to-collect-".to_string(),
+                    }
+                },
                 "mempool_operations_request_secs" => peer.mempool_operations_request_last.elapsed().as_secs(),
                 "mempool_operations_response_secs" => peer.mempool_operations_response_last.elapsed().as_secs(),
                 "current_head_level" => peer.current_head_level,
@@ -1754,7 +1679,6 @@ impl Receive<DisconnectStalledPeers> for ChainManager {
         self.peers.iter()
             .for_each(|(uri, state)| {
                 let current_head_response_pending = state.current_head_request_last > state.current_head_response_last;
-                let block_operations_response_pending = state.block_operations_request_last > state.block_operations_response_last;
                 let mempool_operations_response_pending = state.mempool_operations_request_last > state.mempool_operations_response_last;
                 let known_higher_head = match state.current_head_level {
                     Some(peer_level) => match self.current_head.has_any_higher_than(peer_level) {
@@ -1770,11 +1694,11 @@ impl Receive<DisconnectStalledPeers> for ChainManager {
 
                 // chcek penalty peer for not responding to our requests on time
                 let block_response_pending = match state.is_block_response_pending(msg.silent_peer_timeout) {
-                    Ok(block_response_pending) => {
+                    Ok(response_pending) => {
                         warn!(ctx.system.log(), "Peer did not respond to our request for block on time";
                                                 "silent_peer_timeout_exceeded" => format!("{:?}", msg.silent_peer_timeout),
                                                 "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
-                        block_response_pending
+                        response_pending
                     },
                     Err(e) => {
                         warn!(ctx.system.log(), "Failed to resolve, if block response pending, for peer (so behave as ok)";
@@ -1783,8 +1707,22 @@ impl Receive<DisconnectStalledPeers> for ChainManager {
                         false
                     }
                 };
+                let block_operations_response_pending = match state.is_block_operations_response_pending(msg.silent_peer_timeout) {
+                    Ok(response_pending) => {
+                        warn!(ctx.system.log(), "Peer did not respond to our request for block operations on time";
+                                                "silent_peer_timeout_exceeded" => format!("{:?}", msg.silent_peer_timeout),
+                                                "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
+                        response_pending
+                    },
+                    Err(e) => {
+                        warn!(ctx.system.log(), "Failed to resolve, if block operations response pending, for peer (so behave as ok)";
+                                                "reason" => format!("{}", e),
+                                                "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
+                        false
+                    }
+                };
 
-                let should_disconnect = if block_response_pending {
+                let should_disconnect = if block_response_pending || block_operations_response_pending {
                     true
                 } else if current_head_response_pending && (state.current_head_request_last - state.current_head_response_last > msg.silent_peer_timeout) {
                     warn!(ctx.system.log(), "Peer did not respond to our request for current_head on time"; "request_secs" => state.current_head_request_last.elapsed().as_secs(), "response_secs" => state.current_head_response_last.elapsed().as_secs(),
@@ -1818,14 +1756,6 @@ impl Receive<DisconnectStalledPeers> for ChainManager {
                                             },
                                             "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
                     true
-                } else if block_operations_response_pending && (state.block_operations_request_last - state.block_operations_response_last > msg.silent_peer_timeout) {
-                    warn!(ctx.system.log(), "Peer did not respond to our request for block operations on time"; "request_secs" => state.block_operations_request_last.elapsed().as_secs(), "response_secs" => state.block_operations_response_last.elapsed().as_secs(),
-                                            "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
-                    true
-                    // } else if block_operations_response_pending && !state.queued_block_operations.is_empty() && (state.block_operations_response_last.elapsed() > msg.silent_peer_timeout) {
-                    //     warn!(ctx.system.log(), "Peer is not providing requested block operations"; "queued_count" => state.queued_block_operations.len(), "response_secs" => state.block_operations_response_last.elapsed().as_secs(),
-                    //                             "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());
-                    //     true
                 } else if mempool_operations_response_pending && !state.queued_mempool_operations.is_empty() && (state.mempool_operations_response_last.elapsed() > msg.silent_peer_timeout) {
                     warn!(ctx.system.log(), "Peer is not providing requested mempool operations"; "queued_count" => state.queued_mempool_operations.len(), "response_secs" => state.mempool_operations_response_last.elapsed().as_secs(),
                                             "peer_id" => state.peer_id.peer_id_marker.clone(), "peer_ip" => state.peer_id.peer_address.to_string(), "peer" => state.peer_id.peer_ref.name(), "peer_uri" => uri.to_string());

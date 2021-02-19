@@ -423,8 +423,6 @@ impl BlockchainState {
                         peer.peer_id.clone(),
                         peer.queues.clone(),
                         self.requester.clone(),
-                        peer.queued_block_headers2.clone(),
-                        peer.queued_block_operations2.clone(),
                         self.shell_channel.clone(),
                         self.chain_feeder_channel.clone(),
                         self.block_applier.clone(),
@@ -558,7 +556,7 @@ impl BlockchainState {
             Some(meta) => Ok((meta.is_complete(), meta.get_missing_validation_passes())),
             None => self
                 .operations_meta_storage
-                .put_block_header(block_header, &self.chain_id),
+                .put_block_header(block_header, self.chain_id.as_ref().clone()),
         }
     }
 
@@ -575,19 +573,30 @@ impl BlockchainState {
             Some(meta) => Ok(meta.is_complete()),
             None => self
                 .operations_meta_storage
-                .put_block_header(block_header, &self.chain_id)
+                .put_block_header(block_header, self.chain_id.as_ref().clone())
                 .map(|(is_complete, _)| is_complete),
         }
     }
 
+    /// Processes comming operations from peers
+    ///
+    /// Returns true, if new block is successfully downloaded by this call
     pub fn process_block_operations_from_peer(
         &mut self,
         peer: &mut PeerState,
         block_hash: &BlockHash,
         message: &OperationsForBlocksMessage,
     ) -> Result<bool, StateError> {
-        // update operations metadata for block
-        let (are_operations_complete, _) = self.process_block_operations(message)?;
+        // TODO: TE-369 - optimize double check
+        // we need to differ this flag
+        let (are_operations_complete, was_block_finished_now) =
+            if self.operations_meta_storage.is_complete(block_hash)? {
+                (true, false)
+            } else {
+                // update operations metadata for block
+                let (are_operations_complete, _) = self.process_block_operations(message)?;
+                (are_operations_complete, are_operations_complete)
+            };
 
         if are_operations_complete {
             // ping branch bootstrapper with received operations
@@ -598,6 +607,7 @@ impl BlockchainState {
                 );
             }
 
+            // TODO: TE-369 - big synchro for apply blocks
             // update block metadata
             if let Some(block_metadata) = self.block_meta_storage.get(block_hash)? {
                 // check if block can be applied
@@ -611,16 +621,16 @@ impl BlockchainState {
                             block_hash.clone(),
                             self.chain_id.clone(),
                             None,
-                            None,
+                            peer.peer_branch_bootstrapper.clone(),
                             Instant::now(),
                         ),
                         None,
                     );
                 }
-            }
+            };
         }
 
-        Ok(are_operations_complete)
+        Ok(was_block_finished_now)
     }
 
     /// Process block operations. This will mark operations in store for the block as seen.
