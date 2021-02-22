@@ -484,7 +484,7 @@ impl BlockchainState {
                     received_block.hash.clone(),
                     self.chain_id.clone(),
                     None,
-                    None,
+                    peer.peer_branch_bootstrapper.clone(),
                     Instant::now(),
                 ),
                 None,

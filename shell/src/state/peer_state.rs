@@ -14,6 +14,7 @@ use networking::PeerId;
 use storage::mempool_storage::MempoolOperationType;
 use storage::BlockHeaderWithHash;
 use tezos_messages::p2p::encoding::block_header::Level;
+use tezos_messages::p2p::encoding::limits;
 use tezos_messages::p2p::encoding::prelude::{
     GetOperationsMessage, MetadataMessage, PeerMessageResponse,
 };
@@ -282,13 +283,22 @@ impl PeerState {
                             .insert(op_hash, (op_type, ttl));
                     });
 
-                let ops_to_get = ops_to_enqueue
+                let ops_to_get: Vec<OperationHash> = ops_to_enqueue
                     .into_iter()
                     .map(|(op_hash, _)| op_hash)
                     .collect();
 
                 peer.mempool_operations_request_last = Instant::now();
-                tell_peer(GetOperationsMessage::new(ops_to_get).into(), peer);
+
+                if limits::GET_OPERATIONS_MAX_LENGTH > 0 {
+                    ops_to_get
+                        .chunks(limits::GET_OPERATIONS_MAX_LENGTH)
+                        .for_each(|ops_to_get| {
+                            tell_peer(GetOperationsMessage::new(ops_to_get.into()).into(), peer)
+                        });
+                } else {
+                    tell_peer(GetOperationsMessage::new(ops_to_get).into(), peer);
+                }
             });
     }
 
@@ -354,8 +364,8 @@ impl Default for MessageStats {
 pub type MissingOperations = HashSet<i8>;
 
 pub struct DataQueues {
-    max_queued_block_headers_count: u16,
-    max_queued_block_operations_count: u16,
+    pub(crate) max_queued_block_headers_count: u16,
+    pub(crate) max_queued_block_operations_count: u16,
 
     /// Queued blocks shared with peer_branch_bootstrapper
     pub(crate) queued_block_headers: Arc<Mutex<HashSet<Arc<BlockHash>>>>,
@@ -389,22 +399,44 @@ impl DataQueues {
         }
     }
 
-    pub fn available_queued_block_headers_capacity(&self) -> Result<usize, StateError> {
-        let queued_count = self.queued_block_headers.lock()?.len();
-        if queued_count < self.max_queued_block_headers_count as usize {
-            Ok((self.max_queued_block_headers_count as usize) - queued_count)
+    pub fn get_already_queued_block_headers_and_max_capacity(
+        &self,
+    ) -> Result<(HashSet<Arc<BlockHash>>, usize), StateError> {
+        // lock, get queued and release
+        let already_queued: HashSet<Arc<BlockHash>> = self
+            .queued_block_headers
+            .lock()?
+            .iter()
+            .map(|b| b.clone())
+            .collect();
+
+        let available = if already_queued.len() < self.max_queued_block_headers_count as usize {
+            (self.max_queued_block_headers_count as usize) - already_queued.len()
         } else {
-            Ok(0)
-        }
+            0
+        };
+
+        Ok((already_queued, available))
     }
 
-    pub fn available_queued_block_operations_capacity(&self) -> Result<usize, StateError> {
-        let queued_count = self.queued_block_operations.lock()?.len();
-        if queued_count < self.max_queued_block_operations_count as usize {
-            Ok((self.max_queued_block_operations_count as usize) - queued_count)
+    pub fn get_already_queued_block_operations_and_max_capacity(
+        &self,
+    ) -> Result<(HashSet<Arc<BlockHash>>, usize), StateError> {
+        // lock, get queued and release
+        let already_queued: HashSet<Arc<BlockHash>> = self
+            .queued_block_operations
+            .lock()?
+            .iter()
+            .map(|(b, _)| b.clone())
+            .collect();
+
+        let available = if already_queued.len() < self.max_queued_block_operations_count as usize {
+            (self.max_queued_block_operations_count as usize) - already_queued.len()
         } else {
-            Ok(0)
-        }
+            0
+        };
+
+        Ok((already_queued, available))
     }
 }
 

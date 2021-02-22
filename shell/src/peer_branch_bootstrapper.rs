@@ -1,7 +1,7 @@
 // Copyright (c) SimpleStaking and Tezedge Contributors
 // SPDX-License-Identifier: MIT
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -641,19 +641,22 @@ fn schedule_block_downloading(
     operations_meta_storage: &OperationsMetaStorage,
     log: &Logger,
 ) -> bool {
-    // get peer's queue available capacity for blocks
-    let available_queue_capacity = match peer_queues.available_queued_block_headers_capacity() {
-        Ok(capacity) => capacity,
+    // get peer's actual queued items and available capacity for operations
+    let (already_queued, available_queue_capacity) = match peer_queues
+        .get_already_queued_block_headers_and_max_capacity()
+    {
+        Ok(queued_and_capacity) => queued_and_capacity,
         Err(e) => {
-            warn!(log, "Failed to get available blocks queue capacity for peer (so return 0)"; "reason" => e,
+            warn!(log, "Failed to get available blocks queue capacity for peer (so ignore this step run)"; "reason" => e,
                         "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
-            0
+            return false;
         }
     };
 
     // get blocks to download
     match bootstrap.find_next_blocks_to_download(
         available_queue_capacity,
+        already_queued,
         MAX_BOOTSTRAP_INTERVAL_AHEAD_LOOK_COUNT,
         |block_hash| block_metadata(block_hash, block_meta_storage, operations_meta_storage),
     ) {
@@ -684,22 +687,22 @@ fn schedule_operations_downloading(
     operations_meta_storage: &mut OperationsMetaStorage,
     log: &Logger,
 ) -> bool {
-    // get peer's queue available capacity for operations
-    let available_queue_capacity = match peer_queues.available_queued_block_operations_capacity() {
-        Ok(capacity) => capacity,
+    // get peer's actual queued items and available capacity for operations
+    let (already_queued, available_queue_capacity) = match peer_queues
+        .get_already_queued_block_operations_and_max_capacity()
+    {
+        Ok(queued_and_capacity) => queued_and_capacity,
         Err(e) => {
-            warn!(log, "Failed to get available operations queue capacity for peer (so return 0)"; "reason" => e,
+            warn!(log, "Failed to get available operations queue capacity for peer (so ignore this step run)"; "reason" => e,
                         "peer_id" => peer.peer_id_marker.clone(), "peer_ip" => peer.peer_address.to_string(), "peer" => peer.peer_ref.name(), "peer_uri" => peer.peer_ref.uri().to_string());
-            0
+            return false;
         }
     };
-
-    let ignored_blocks = HashSet::default();
 
     // get blocks to download
     match bootstrap.find_next_block_operations_to_download(
         available_queue_capacity,
-        ignored_blocks,
+        already_queued,
         MAX_BOOTSTRAP_INTERVAL_AHEAD_LOOK_COUNT,
         |block_hash| {
             operations_meta_storage

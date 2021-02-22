@@ -18,6 +18,7 @@ use crypto::hash::BlockHash;
 use networking::p2p::peer::SendMessage;
 use networking::PeerId;
 use storage::OperationsMetaStorage;
+use tezos_messages::p2p::encoding::limits;
 use tezos_messages::p2p::encoding::prelude::{
     GetBlockHeadersMessage, GetOperationsForBlocksMessage, OperationsForBlock, PeerMessageResponse,
 };
@@ -64,11 +65,18 @@ impl DataRequester {
             return Ok(false);
         }
 
-        // get available capacity
-        let available_capacity = peer_queues.available_queued_block_headers_capacity()?;
-
         // get queue locks
         let mut peer_queued_block_headers = peer_queues.queued_block_headers.lock()?;
+
+        // calculate available capacity
+        let available_capacity = if peer_queued_block_headers.len()
+            < peer_queues.max_queued_block_headers_count as usize
+        {
+            (peer_queues.max_queued_block_headers_count as usize) - peer_queued_block_headers.len()
+        } else {
+            // full queue, we cannot schedule more
+            return Ok(false);
+        };
 
         // fillter non-queued
         let mut blocks_to_download = blocks_to_download
@@ -93,16 +101,33 @@ impl DataRequester {
             drop(peer_queued_block_headers);
 
             // send p2p msg - now we can fire msg to peer
-            tell_peer(
-                GetBlockHeadersMessage::new(
-                    blocks_to_download
-                        .iter()
-                        .map(|b| b.as_ref().clone())
-                        .collect::<Vec<BlockHash>>(),
-                )
-                .into(),
-                peer,
-            );
+            if limits::GET_BLOCK_HEADERS_MAX_LENGTH > 0 {
+                blocks_to_download
+                    .chunks(limits::GET_BLOCK_HEADERS_MAX_LENGTH)
+                    .for_each(|blocks_to_download| {
+                        tell_peer(
+                            GetBlockHeadersMessage::new(
+                                blocks_to_download
+                                    .iter()
+                                    .map(|b| b.as_ref().clone())
+                                    .collect::<Vec<BlockHash>>(),
+                            )
+                            .into(),
+                            peer,
+                        );
+                    });
+            } else {
+                tell_peer(
+                    GetBlockHeadersMessage::new(
+                        blocks_to_download
+                            .iter()
+                            .map(|b| b.as_ref().clone())
+                            .collect::<Vec<BlockHash>>(),
+                    )
+                    .into(),
+                    peer,
+                );
+            }
 
             // peer request stats
             match peer_queues.block_request_last.write() {
@@ -131,11 +156,19 @@ impl DataRequester {
             return Ok(false);
         }
 
-        // get available capacity
-        let available_capacity = peer_queues.available_queued_block_operations_capacity()?;
-
         // get queue locks
         let mut peer_queued_block_headers = peer_queues.queued_block_operations.lock()?;
+
+        // calculate available capacity
+        let available_capacity = if peer_queued_block_headers.len()
+            < peer_queues.max_queued_block_operations_count as usize
+        {
+            (peer_queues.max_queued_block_operations_count as usize)
+                - peer_queued_block_headers.len()
+        } else {
+            // full queue, we cannot schedule more
+            return Ok(false);
+        };
 
         // fillter non-queued
         let mut blocks_to_download = blocks_to_download
@@ -180,20 +213,40 @@ impl DataRequester {
             drop(peer_queued_block_headers);
 
             // send p2p msg - now we can fire msg to peer
-            tell_peer(
-                GetOperationsForBlocksMessage::new(
-                    blocks_to_download
-                        .into_iter()
-                        .flat_map(|(block, missing_ops)| {
-                            missing_ops
-                                .into_iter()
-                                .map(move |vp| OperationsForBlock::new(block.as_ref().clone(), vp))
-                        })
-                        .collect(),
-                )
-                .into(),
-                peer,
-            );
+            if limits::GET_OPERATIONS_FOR_BLOCKS_MAX_LENGTH > 0 {
+                let blocks_to_download: Vec<OperationsForBlock> = blocks_to_download
+                    .into_iter()
+                    .flat_map(|(block, missing_ops)| {
+                        missing_ops
+                            .into_iter()
+                            .map(move |vp| OperationsForBlock::new(block.as_ref().clone(), vp))
+                    })
+                    .collect();
+
+                blocks_to_download
+                    .chunks(limits::GET_OPERATIONS_FOR_BLOCKS_MAX_LENGTH)
+                    .for_each(|blocks_to_download| {
+                        tell_peer(
+                            GetOperationsForBlocksMessage::new(blocks_to_download.into()).into(),
+                            peer,
+                        );
+                    });
+            } else {
+                tell_peer(
+                    GetOperationsForBlocksMessage::new(
+                        blocks_to_download
+                            .into_iter()
+                            .flat_map(|(block, missing_ops)| {
+                                missing_ops.into_iter().map(move |vp| {
+                                    OperationsForBlock::new(block.as_ref().clone(), vp)
+                                })
+                            })
+                            .collect(),
+                    )
+                    .into(),
+                    peer,
+                );
+            }
 
             // peer request stats
             match peer_queues.block_operations_request_last.write() {

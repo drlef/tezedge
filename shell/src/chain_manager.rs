@@ -546,6 +546,16 @@ impl ChainManager {
                                                 warn!(log, "Failed to update remote head (by current head)"; "reason" => e);
                                             }
 
+                                            // process downloaded block directly
+                                            Self::process_downloaded_header(
+                                                message_current_head.clone(),
+                                                peer,
+                                                stats,
+                                                chain_state,
+                                                shell_channel,
+                                                &log,
+                                            )?;
+
                                             // here we accept head, which also means that we know predecessor
                                             // so we can schedule to download diff (last_applied_block .. current_head)
                                             let mut history = Vec::with_capacity(1);
@@ -558,55 +568,13 @@ impl ChainManager {
                                                 history.push(cur.block_hash().clone());
                                             }
 
-                                            // we need to simulate scheduling, so we add
-                                            let was_queued = if peer
-                                                .queues
-                                                .available_queued_block_headers_capacity()?
-                                                > 0
-                                            {
-                                                if let Ok(mut queue) =
-                                                    peer.queues.queued_block_headers.lock()
-                                                {
-                                                    queue.insert(Arc::new(
-                                                        message_current_head.hash.clone(),
-                                                    ))
-                                                } else {
-                                                    false
-                                                }
-                                            } else {
-                                                false
-                                            };
-
+                                            // this schedule, ensure to download all operations from this peer (if not already)
                                             chain_state.schedule_history_bootstrap(
                                                 &ctx.system,
                                                 peer,
                                                 &message_current_head,
                                                 history,
                                             )?;
-
-                                            // if scheduled, we can proces it directly, if not, we will wait scheduled bootstrap
-                                            if was_queued {
-                                                if let Some(requested_data) =
-                                                    chain_state.requester().block_header_received(
-                                                        &message_current_head.hash,
-                                                        peer,
-                                                        &log,
-                                                    )?
-                                                {
-                                                    // process downloaded block directly
-                                                    Self::process_downloaded_header(
-                                                        message_current_head,
-                                                        peer,
-                                                        stats,
-                                                        chain_state,
-                                                        shell_channel,
-                                                        &log,
-                                                    )?;
-
-                                                    // explicit drop (not needed)
-                                                    drop(requested_data);
-                                                }
-                                            }
 
                                             // schedule mempool download
                                             let peer_current_mempool = message.current_mempool();

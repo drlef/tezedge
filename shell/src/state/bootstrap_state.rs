@@ -64,6 +64,7 @@ impl BootstrapState {
     pub fn find_next_blocks_to_download<BM>(
         &mut self,
         requested_count: usize,
+        mut ignored_blocks: HashSet<Arc<BlockHash>>,
         max_interval_ahead_count: i8,
         get_block_metadata: BM,
     ) -> Result<Vec<Arc<BlockHash>>, StateError>
@@ -71,6 +72,9 @@ impl BootstrapState {
         BM: Fn(&BlockHash) -> Result<Option<(InnerBlockState, Arc<BlockHash>)>, StateError>,
     {
         let mut result = Vec::with_capacity(requested_count);
+        if requested_count == 0 {
+            return Ok(result);
+        }
         let mut max_interval_ahead_count = max_interval_ahead_count;
 
         // lets iterate intervals
@@ -82,11 +86,12 @@ impl BootstrapState {
 
             // let walk throught interval and resolve first missing block
             let (missing_block, was_interval_updated) =
-                interval.find_first_missing_block(&result, &get_block_metadata)?;
+                interval.find_first_missing_block(&ignored_blocks, &get_block_metadata)?;
 
             // add to scheduled and continue
             if let Some(missing_block) = missing_block {
                 result.push(missing_block.clone());
+                ignored_blocks.insert(missing_block);
                 max_interval_ahead_count -= 1;
             }
             if was_interval_updated {
@@ -112,6 +117,10 @@ impl BootstrapState {
         OC: Fn(&BlockHash) -> Result<bool, StateError>,
     {
         let mut result = Vec::with_capacity(requested_count);
+        if requested_count == 0 {
+            return Ok(result);
+        }
+
         let mut max_interval_ahead_count = max_interval_ahead_count;
 
         // lets iterate intervals
@@ -539,7 +548,7 @@ impl BootstrapInterval {
     ///     1 -> true/false if we updated interval
     fn find_first_missing_block<BM>(
         &mut self,
-        ignored_blocks: &[Arc<BlockHash>],
+        ignored_blocks: &HashSet<Arc<BlockHash>>,
         get_block_metadata: BM,
     ) -> Result<(Option<Arc<BlockHash>>, bool), StateError>
     where
@@ -684,7 +693,7 @@ impl BootstrapInterval {
     pub(crate) fn find_block_with_missing_operations<OC>(
         &mut self,
         requested_count: usize,
-        ignore_blocks: &HashSet<Arc<BlockHash>>,
+        ignored_blocks: &HashSet<Arc<BlockHash>>,
         is_operations_complete: OC,
     ) -> Result<(Vec<Arc<BlockHash>>, bool), StateError>
     where
@@ -704,7 +713,7 @@ impl BootstrapInterval {
             }
 
             // ignored skip also
-            if ignore_blocks.contains(&b.block_hash) {
+            if ignored_blocks.contains(&b.block_hash) {
                 continue;
             }
 
@@ -904,7 +913,8 @@ mod tests {
         // register downloaded block 2 with his predecessor 1
         assert!(!pipeline.intervals[0].all_blocks_downloaded);
         assert_eq!(pipeline.intervals[0].blocks.len(), 2);
-        let result = pipeline.find_next_blocks_to_download(5, 1, |_| Ok(None))?;
+        let result =
+            pipeline.find_next_blocks_to_download(5, HashSet::default(), 1, |_| Ok(None))?;
         assert_eq!(1, result.len());
         assert_eq!(result[0].as_ref(), block(2).as_ref());
 
@@ -921,7 +931,8 @@ mod tests {
         assert!(!pipeline.intervals[0].all_blocks_downloaded);
         assert_eq!(pipeline.intervals[0].blocks.len(), 3);
 
-        let result = pipeline.find_next_blocks_to_download(5, 1, |_| Ok(None))?;
+        let result =
+            pipeline.find_next_blocks_to_download(5, HashSet::default(), 1, |_| Ok(None))?;
         assert_eq!(1, result.len());
         assert_eq!(result[0].as_ref(), block(1).as_ref());
 
@@ -943,7 +954,8 @@ mod tests {
         assert!(!pipeline.intervals[1].all_blocks_downloaded);
         assert_eq!(pipeline.intervals[1].blocks.len(), 2);
 
-        let result = pipeline.find_next_blocks_to_download(5, 1, |_| Ok(None))?;
+        let result =
+            pipeline.find_next_blocks_to_download(5, HashSet::default(), 1, |_| Ok(None))?;
         assert_eq!(1, result.len());
         assert_eq!(result[0].as_ref(), block(5).as_ref());
 
@@ -1076,21 +1088,25 @@ mod tests {
         assert!(!pipeline.intervals[0].all_blocks_downloaded);
         assert_eq!(2, pipeline.intervals[0].blocks.len());
         assert!(matches!(
-            pipeline.intervals[0].find_first_missing_block(&[], |_| Ok(None))?,
+            pipeline.intervals[0].find_first_missing_block(&HashSet::default(), |_| Ok(None))?,
             (Some(next_block), was_updated) if eq(&next_block, &block(2)) && !was_updated
+        ));
+        assert!(matches!(
+            pipeline.intervals[0].find_first_missing_block(&hash_set![block(2)], |_| Ok(None))?,
+            (None, was_updated) if !was_updated
         ));
 
         // check - 2 is not downloaded but is already scheduled
         assert!(!pipeline.intervals[0].all_blocks_downloaded);
         assert_eq!(2, pipeline.intervals[0].blocks.len());
         assert!(matches!(
-            pipeline.intervals[0].find_first_missing_block(&[block(2)], |_| Ok(None))?,
+            pipeline.intervals[0].find_first_missing_block(&hash_set![block(2)], |_| Ok(None))?,
             (None, was_updated) if !was_updated
         ));
 
         // check - with 2 was downloaded
         assert!(matches!(
-            pipeline.intervals[0].find_first_missing_block(&[], |bh| {
+            pipeline.intervals[0].find_first_missing_block(&HashSet::default(), |bh| {
                 if bh.eq(&block(2)) {
                     result(true, false, false, block(1))
                 } else {
@@ -1104,13 +1120,13 @@ mod tests {
 
         // still waiting for1
         assert!(matches!(
-            pipeline.intervals[0].find_first_missing_block(&[], |_| Ok(None))?,
+            pipeline.intervals[0].find_first_missing_block(&HashSet::default(), |_| Ok(None))?,
             (Some(next_block), was_updated) if eq(&next_block, &block(1)) && !was_updated
         ));
 
         // check - with 1 was downloaded
         assert!(matches!(
-            pipeline.intervals[0].find_first_missing_block(&[], |bh| {
+            pipeline.intervals[0].find_first_missing_block(&HashSet::default(), |bh| {
                 if bh.eq(&block(1)) {
                     result(true, false, false, block(0))
                 } else if bh.eq(&block(0)) {
@@ -1126,7 +1142,7 @@ mod tests {
 
         // check - nothing
         assert!(matches!(
-            pipeline.intervals[0].find_first_missing_block(&[], |_| panic!("test failed"))?,
+            pipeline.intervals[0].find_first_missing_block(&HashSet::default(), |_| panic!("test failed"))?,
             (None, was_updated) if !was_updated
         ));
 
@@ -1169,7 +1185,7 @@ mod tests {
 
         // get next for download
         assert!(matches!(
-            pipeline.intervals[1].find_first_missing_block(&[], |bh| {
+            pipeline.intervals[1].find_first_missing_block(&HashSet::default(), |bh| {
                 // on backgroung all data were downloaded by other peers
                 if bh.eq(&block(5)) {
                     result(true, false, false, block(4))
@@ -1231,7 +1247,7 @@ mod tests {
 
         // get next for download
         assert!(matches!(
-            pipeline.intervals[1].find_first_missing_block(&[], |bh| {
+            pipeline.intervals[1].find_first_missing_block(&HashSet::default(), |bh| {
                 if bh.eq(&block(5)) {
                     result(true, false, false, block(4))
                 } else if bh.eq(&block(4)) {
@@ -1291,18 +1307,28 @@ mod tests {
         assert_eq!(2, pipeline.intervals[1].blocks.len());
 
         // try to get blocks for download - max 1 interval
-        let result = pipeline.find_next_blocks_to_download(5, 1, |_| Ok(None))?;
+        let result =
+            pipeline.find_next_blocks_to_download(5, HashSet::default(), 1, |_| Ok(None))?;
         assert_eq!(1, result.len());
         assert_eq!(result[0].as_ref(), block(2).as_ref());
 
         // try to get blocks for download - max 2 interval
-        let result = pipeline.find_next_blocks_to_download(5, 2, |_| Ok(None))?;
+        let result =
+            pipeline.find_next_blocks_to_download(5, HashSet::default(), 2, |_| Ok(None))?;
         assert_eq!(2, result.len());
         assert_eq!(result[0].as_ref(), block(2).as_ref());
         assert_eq!(result[1].as_ref(), block(5).as_ref());
 
+        // try to get blocks for download - max 2 interval with ignored
+        let result =
+            pipeline.find_next_blocks_to_download(5, hash_set![block(5)], 2, |_| Ok(None))?;
+        assert_eq!(2, result.len());
+        assert_eq!(result[0].as_ref(), block(2).as_ref());
+        assert_eq!(result[1].as_ref(), block(8).as_ref());
+
         // try to get blocks for download - max 4 interval
-        let result = pipeline.find_next_blocks_to_download(5, 4, |_| Ok(None))?;
+        let result =
+            pipeline.find_next_blocks_to_download(5, HashSet::default(), 4, |_| Ok(None))?;
         assert_eq!(4, result.len());
         assert_eq!(result[0].as_ref(), block(2).as_ref());
         assert_eq!(result[1].as_ref(), block(5).as_ref());
