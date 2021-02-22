@@ -223,9 +223,9 @@ fn listen_protocol_events(
                             warn!(log, "Failed to store context action"; "action" => format!("{:?}", &msg.action), "reason" => format!("{}", error));
                         }
                     }
-                }
-
-                if msg.perform {
+                    // NOTE: The "perform" flag is not used anymore, anything with "record" needs to run
+                    // once the storage gets better integrated with the protocol, the distinction will not
+                    // be needed anymore.
                     perform_context_action(&msg.action, context)?;
                 }
             }
