@@ -1180,7 +1180,7 @@ mod tests {
     use crate::backend::{BTreeMapBackend, InMemoryBackend, RocksDBBackend, SledBackend};
     use assert_json_diff::assert_json_eq;
     use rocksdb::{Options, DB};
-    use std::ops::Deref;
+    use std::{ops::Deref, sync::Arc};
     use std::path::{Path, PathBuf};
     use std::{env, fs};
 

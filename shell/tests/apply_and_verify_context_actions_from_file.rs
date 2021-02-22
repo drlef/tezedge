@@ -130,7 +130,13 @@ fn feed_tezedge_context_with_actions() -> Result<(), Error> {
 
     let commit_log = create_commit_log(&commit_log_db_path);
     let kv = create_key_value_store(&key_value_db_path, &cache);
-    let storage = PersistentStorage::new(kv.clone(), kv.clone(), kv, commit_log.clone());
+    let storage = PersistentStorage::new(
+        kv.clone(),
+        kv.clone(),
+        kv,
+        commit_log.clone(),
+        storage::KeyValueStoreBackend::RocksDB, // TODO: test others too?
+    );
     let mut context: Box<dyn ContextApi> = Box::new(TezedgeContext::new(
         BlockStorage::new(&storage),
         storage.merkle(),
