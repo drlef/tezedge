@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crypto::hash::{BlockHash, ContextHash, FromBytesError, HashType};
-use storage::context::{ContextApi, TezedgeContext};
+use storage::context::{ContextApi, TezedgeContext, TreeId};
 use storage::merkle_storage::EntryHash;
 use storage::persistent::{ActionRecorder, PersistentStorage};
 use storage::BlockStorage;
@@ -239,23 +239,17 @@ fn listen_protocol_events(
     Ok(())
 }
 
-// returns hash of the merkle tree that action needs to be
-// applied on
-pub fn get_tree_hash(action: &ContextAction) -> Option<EntryHash> {
+pub fn get_tree_id(action: &ContextAction) -> Option<TreeId> {
     match &action {
-        ContextAction::Get { tree_hash, .. }
-        | ContextAction::Mem { tree_hash, .. }
-        | ContextAction::DirMem { tree_hash, .. }
-        | ContextAction::Set { tree_hash, .. }
-        | ContextAction::Copy { tree_hash, .. }
-        | ContextAction::Delete { tree_hash, .. }
-        | ContextAction::RemoveRecursively { tree_hash, .. }
-        | ContextAction::Commit { tree_hash, .. }
-        | ContextAction::Fold { tree_hash, .. } => tree_hash.clone().map(|hash| {
-            let mut buffer: EntryHash = [0; 32];
-            hash.reader().read_exact(&mut buffer).unwrap();
-            Some(buffer)
-        })?,
+        ContextAction::Get { tree_id, .. }
+        | ContextAction::Mem { tree_id, .. }
+        | ContextAction::DirMem { tree_id, .. }
+        | ContextAction::Set { tree_id, .. }
+        | ContextAction::Copy { tree_id, .. }
+        | ContextAction::Delete { tree_id, .. }
+        | ContextAction::RemoveRecursively { tree_id, .. }
+        | ContextAction::Commit { tree_id, .. }
+        | ContextAction::Fold { tree_id, .. } => Some(*tree_id),
         ContextAction::Checkout { .. } | ContextAction::Shutdown => None,
     }
 }
@@ -295,51 +289,64 @@ pub fn perform_context_action(
     action: &ContextAction,
     context: &mut Box<dyn ContextApi>,
 ) -> Result<(), Error> {
-    if let Some(pre_hash) = get_tree_hash(&action) {
-        context.set_merkle_root(pre_hash)?;
+    if let Some(tree_id) = get_tree_id(&action) {
+        context.set_merkle_root(tree_id)?;
     }
 
     match action {
-        ContextAction::Get { key, .. } => {
-            context.get_key(key)?;
+        ContextAction::Get { key, tree_id, .. } => {
+            context.get_key(*tree_id, key)?;
         }
-        ContextAction::Mem { key, .. } => {
-            context.mem(key)?;
+        ContextAction::Mem { key, tree_id, .. } => {
+            context.mem(*tree_id, key)?;
         }
-        ContextAction::DirMem { key, .. } => {
-            context.dirmem(key)?;
+        ContextAction::DirMem { key, tree_id, .. } => {
+            context.dirmem(*tree_id, key)?;
         }
         ContextAction::Set {
             key,
             value,
+            tree_id,
+            new_tree_id,
             context_hash,
             ..
         } => {
             let context_hash = try_from_untyped_option(context_hash)?;
-            context.set(&context_hash, key, value)?;
+            context.set(&context_hash, *tree_id, *new_tree_id, key, value)?;
         }
         ContextAction::Copy {
             to_key: key,
             from_key,
+            tree_id,
+            new_tree_id,
             context_hash,
             ..
         } => {
             let context_hash = try_from_untyped_option(context_hash)?;
-            context.copy_to_diff(&context_hash, from_key, key)?;
+            context.copy_to_diff(&context_hash, *tree_id, *new_tree_id, from_key, key)?;
         }
         ContextAction::Delete {
-            key, context_hash, ..
+            key,
+            tree_id,
+            new_tree_id,
+            context_hash,
+            ..
         } => {
             let context_hash = try_from_untyped_option(context_hash)?;
-            context.delete_to_diff(&context_hash, key)?;
+            context.delete_to_diff(&context_hash, *tree_id, *new_tree_id, key)?;
         }
         ContextAction::RemoveRecursively {
-            key, context_hash, ..
+            key,
+            tree_id,
+            new_tree_id,
+            context_hash,
+            ..
         } => {
             let context_hash = try_from_untyped_option(context_hash)?;
-            context.remove_recursively_to_diff(&context_hash, key)?;
+            context.remove_recursively_to_diff(&context_hash, *tree_id, *new_tree_id, key)?;
         }
         ContextAction::Commit {
+            tree_id,
             parent_context_hash,
             new_context_hash,
             block_hash: Some(block_hash),
@@ -354,6 +361,7 @@ pub fn perform_context_action(
             let hash = context.commit(
                 &block_hash,
                 &parent_context_hash,
+                *tree_id,
                 author.to_string(),
                 message.to_string(),
                 *date,

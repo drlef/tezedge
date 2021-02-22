@@ -37,6 +37,8 @@ pub fn test_context_set_get_commit() -> Result<(), failure::Error> {
     // add to context
     context.set(
         &None,
+        0,
+        1,
         &context_key!("data/rolls/owner/current/index/123"),
         &vec![1, 2, 3, 4, 5, 6],
     )?;
@@ -48,6 +50,7 @@ pub fn test_context_set_get_commit() -> Result<(), failure::Error> {
     let hash = context.commit(
         &block.hash,
         &None,
+        1,
         "Tezos".to_string(),
         "Genesis".to_string(),
         0,
@@ -88,31 +91,43 @@ pub fn test_context_delete_and_remove() -> Result<(), failure::Error> {
     // add to context
     context.set(
         &None,
+        0,
+        1,
         &context_key!("data/rolls/owner/current/cpu/0"),
         &vec![1, 2, 3, 4],
     )?;
     context.set(
         &None,
+        1,
+        2,
         &context_key!("data/rolls/owner/current/cpu/1/a"),
         &vec![1, 2, 3, 4, 5],
     )?;
     context.set(
         &None,
+        2,
+        3,
         &context_key!("data/rolls/owner/current/cpu/1/b"),
         &vec![1, 2, 3, 4, 5],
     )?;
     context.set(
         &None,
+        3,
+        4,
         &context_key!("data/rolls/owner/current/cpu/2/a"),
         &vec![1, 2, 3, 4, 5, 61],
     )?;
     context.set(
         &None,
+        4,
+        5,
         &context_key!("data/rolls/owner/current/cpu/2/b"),
         &vec![1, 2, 3, 4, 5, 62],
     )?;
     context.set(
         &None,
+        5,
+        6,
         &context_key!("data/rolls/owner/current/index/123"),
         &vec![1, 2, 3, 4, 5, 6, 7],
     )?;
@@ -124,6 +139,7 @@ pub fn test_context_delete_and_remove() -> Result<(), failure::Error> {
     let hash = context.commit(
         &block.hash,
         &None,
+        6,
         "Tezos".to_string(),
         "Genesis".to_string(),
         0,
@@ -179,10 +195,14 @@ pub fn test_context_delete_and_remove() -> Result<(), failure::Error> {
     // 1. remove rec
     context.remove_recursively_to_diff(
         &Some(context_hash_1.clone()),
+        0,
+        1,
         &context_key!("data/rolls/owner/current/cpu/2"),
     )?;
     context.delete_to_diff(
         &Some(context_hash_1.clone()),
+        1,
+        2,
         &context_key!("data/rolls/owner/current/cpu/1/b"),
     )?;
 
@@ -193,6 +213,7 @@ pub fn test_context_delete_and_remove() -> Result<(), failure::Error> {
     let hash = context.commit(
         &block.hash,
         &Some(context_hash_1),
+        2,
         "Tezos".to_string(),
         "Genesis".to_string(),
         0,
@@ -258,26 +279,36 @@ pub fn test_context_copy() -> Result<(), failure::Error> {
     // add to context
     context.set(
         &None,
+        0,
+        1,
         &context_key!("data/rolls/owner/current/cpu/0"),
         &vec![1, 2, 3, 4],
     )?;
     context.set(
         &None,
+        1,
+        2,
         &context_key!("data/rolls/owner/current/cpu/1"),
         &vec![1, 2, 3, 4, 5],
     )?;
     context.set(
         &None,
+        2,
+        3,
         &context_key!("data/rolls/owner/current/cpu/2/a"),
         &vec![1, 2, 3, 4, 5, 61],
     )?;
     context.set(
         &None,
+        3,
+        4,
         &context_key!("data/rolls/owner/current/cpu/2/b"),
         &vec![1, 2, 3, 4, 5, 62],
     )?;
     context.set(
         &None,
+        4,
+        5,
         &context_key!("data/rolls/owner/current/index/123"),
         &vec![1, 2, 3, 4, 5, 6, 7],
     )?;
@@ -289,6 +320,7 @@ pub fn test_context_copy() -> Result<(), failure::Error> {
     let hash = context.commit(
         &block.hash,
         &None,
+        5,
         "Tezos".to_string(),
         "Genesis".to_string(),
         0,
@@ -338,6 +370,8 @@ pub fn test_context_copy() -> Result<(), failure::Error> {
     // 1. copy
     context.copy_to_diff(
         &Some(context_hash_1.clone()),
+        0,
+        1,
         &context_key!("data/rolls/owner/current"),
         &context_key!("data/rolls/owner/snapshot/01/02"),
     )?;
@@ -349,6 +383,7 @@ pub fn test_context_copy() -> Result<(), failure::Error> {
     let hash = context.commit(
         &block.hash,
         &Some(context_hash_1),
+        1,
         "Tezos".to_string(),
         "Genesis".to_string(),
         0,
