@@ -26,7 +26,6 @@ pub trait ContextApi {
     fn set(
         &mut self,
         context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         new_tree_id: TreeId,
         key: &ContextKey,
         value: &ContextValue,
@@ -39,7 +38,6 @@ pub trait ContextApi {
         &mut self,
         block_hash: &BlockHash,
         parent_context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         author: String,
         message: String,
         date: i64,
@@ -47,14 +45,12 @@ pub trait ContextApi {
     fn delete_to_diff(
         &self,
         context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         new_tree_id: TreeId,
         key_prefix_to_delete: &ContextKey,
     ) -> Result<(), ContextError>;
     fn remove_recursively_to_diff(
         &self,
         context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         new_tree_id: TreeId,
         key_prefix_to_remove: &ContextKey,
     ) -> Result<(), ContextError>;
@@ -62,17 +58,16 @@ pub trait ContextApi {
     fn copy_to_diff(
         &self,
         context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         new_tree_id: TreeId,
         from_key: &ContextKey,
         to_key: &ContextKey,
     ) -> Result<(), ContextError>;
     // get value for key
-    fn get_key(&self, tree_id: TreeId, key: &ContextKey) -> Result<ContextValue, ContextError>;
+    fn get_key(&self, key: &ContextKey) -> Result<ContextValue, ContextError>;
     // mem - check if value exists
-    fn mem(&self, tree_id: TreeId, key: &ContextKey) -> Result<bool, ContextError>;
+    fn mem(&self, key: &ContextKey) -> Result<bool, ContextError>;
     // dirmem - check if directory exists
-    fn dirmem(&self, tree_id: TreeId, key: &ContextKey) -> Result<bool, ContextError>;
+    fn dirmem(&self, key: &ContextKey) -> Result<bool, ContextError>;
     // get value for key from a point in history indicated by context hash
     fn get_key_from_history(
         &self,
@@ -111,13 +106,11 @@ impl ContextApi for TezedgeContext {
     fn set(
         &mut self,
         _context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         new_tree_id: TreeId,
         key: &ContextKey,
         value: &ContextValue,
     ) -> Result<(), ContextError> {
         let mut merkle = self.merkle.write().expect("lock poisoning");
-        merkle.stage_checkout(tree_id)?;
         merkle.set(new_tree_id, key, value)?;
 
         Ok(())
@@ -135,14 +128,11 @@ impl ContextApi for TezedgeContext {
         &mut self,
         block_hash: &BlockHash,
         parent_context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         author: String,
         message: String,
         date: i64,
     ) -> Result<ContextHash, ContextError> {
         let mut merkle = self.merkle.write().expect("lock poisoning");
-
-        merkle.stage_checkout(tree_id)?;
 
         let date: u64 = date.try_into()?;
         let commit_hash = merkle.commit(date, author, message)?;
@@ -184,12 +174,10 @@ impl ContextApi for TezedgeContext {
     fn delete_to_diff(
         &self,
         _context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         new_tree_id: TreeId,
         key_prefix_to_delete: &ContextKey,
     ) -> Result<(), ContextError> {
         let mut merkle = self.merkle.write().expect("lock poisoning");
-        merkle.stage_checkout(tree_id)?;
         merkle.delete(new_tree_id, key_prefix_to_delete)?;
         Ok(())
     }
@@ -197,12 +185,10 @@ impl ContextApi for TezedgeContext {
     fn remove_recursively_to_diff(
         &self,
         _context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         new_tree_id: TreeId,
         key_prefix_to_remove: &ContextKey,
     ) -> Result<(), ContextError> {
         let mut merkle = self.merkle.write().expect("lock poisoning");
-        merkle.stage_checkout(tree_id)?;
         merkle.delete(new_tree_id, key_prefix_to_remove)?;
         Ok(())
     }
@@ -210,34 +196,29 @@ impl ContextApi for TezedgeContext {
     fn copy_to_diff(
         &self,
         _context_hash: &Option<ContextHash>,
-        tree_id: TreeId,
         new_tree_id: TreeId,
         from_key: &ContextKey,
         to_key: &ContextKey,
     ) -> Result<(), ContextError> {
         let mut merkle = self.merkle.write().expect("lock poisoning");
-        merkle.stage_checkout(tree_id)?;
         merkle.copy(new_tree_id, from_key, to_key)?;
         Ok(())
     }
 
-    fn get_key(&self, tree_id: TreeId, key: &ContextKey) -> Result<ContextValue, ContextError> {
+    fn get_key(&self, key: &ContextKey) -> Result<ContextValue, ContextError> {
         let mut merkle = self.merkle.write().expect("lock poisoning");
-        merkle.stage_checkout(tree_id)?;
         let val = merkle.get(key)?;
         Ok(val)
     }
 
-    fn mem(&self, tree_id: TreeId, key: &ContextKey) -> Result<bool, ContextError> {
+    fn mem(&self, key: &ContextKey) -> Result<bool, ContextError> {
         let mut merkle = self.merkle.write().expect("lock poisoning");
-        merkle.stage_checkout(tree_id)?;
         let val = merkle.mem(key)?;
         Ok(val)
     }
 
-    fn dirmem(&self, tree_id: TreeId, key: &ContextKey) -> Result<bool, ContextError> {
+    fn dirmem(&self, key: &ContextKey) -> Result<bool, ContextError> {
         let mut merkle = self.merkle.write().expect("lock poisoning");
-        merkle.stage_checkout(tree_id)?;
         let val = merkle.dirmem(key)?;
         Ok(val)
     }
