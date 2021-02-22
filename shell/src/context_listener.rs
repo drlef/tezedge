@@ -20,7 +20,7 @@ use storage::context::{ContextApi, TezedgeContext, TreeId};
 use storage::merkle_storage::EntryHash;
 use storage::persistent::{ActionRecorder, PersistentStorage};
 use storage::BlockStorage;
-use tezos_context::channel::{ContextAction, ContextActionMessage};
+use tezos_context::channel::ContextAction;
 use tezos_wrapper::service::IpcEvtServer;
 
 use crate::shell_channel::{ShellChannelMsg, ShellChannelRef};
@@ -187,17 +187,14 @@ fn listen_protocol_events(
 
     while apply_block_run.load(Ordering::Acquire) {
         match rx.receive() {
-            Ok(ContextActionMessage {
-                action: ContextAction::Shutdown,
-                ..
-            }) => {
+            Ok(ContextAction::Shutdown) => {
                 // when we receive shutting down, it means just that protocol runner disconnected
                 // we dont want to stop context listener here, for example, because we are just restarting protocol runner
                 // and we want to wait for a new one to try_accept
                 // if we want to shutdown context listener, there is ShellChannelMsg for that
                 break;
             }
-            Ok(msg) => {
+            Ok(action) => {
                 if event_count % 100 == 0 {
                     debug!(
                         log,
@@ -210,24 +207,15 @@ fn listen_protocol_events(
                     );
                 }
 
-                event_count = if let ContextAction::Shutdown = &msg.action {
-                    0
-                } else {
-                    event_count + 1
-                };
+                event_count += 1;
 
-                if msg.record {
-                    // record action in the order they are really comming
-                    for recorder in action_store_backend.iter_mut() {
-                        if let Err(error) = recorder.record(&msg) {
-                            warn!(log, "Failed to store context action"; "action" => format!("{:?}", &msg.action), "reason" => format!("{}", error));
-                        }
+                for recorder in action_store_backend.iter_mut() {
+                    if let Err(error) = recorder.record(&action) {
+                        warn!(log, "Failed to store context action"; "action" => format!("{:?}", &action), "reason" => format!("{}", error));
                     }
-                    // NOTE: The "perform" flag is not used anymore, anything with "record" needs to run
-                    // once the storage gets better integrated with the protocol, the distinction will not
-                    // be needed anymore.
-                    perform_context_action(&msg.action, context)?;
                 }
+
+                perform_context_action(&action, context)?;
             }
             Err(err) => {
                 warn!(log, "Failed to receive event from protocol runner"; "reason" => format!("{:?}", err));
