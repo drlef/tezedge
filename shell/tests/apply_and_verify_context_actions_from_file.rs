@@ -134,7 +134,7 @@ fn feed_tezedge_context_with_actions() -> Result<(), Error> {
         kv.clone(),
         kv.clone(),
         kv,
-        commit_log.clone(),
+        commit_log,
         storage::KeyValueStoreBackend::RocksDB, // TODO: test others too?
     );
     let mut context: Box<dyn ContextApi> = Box::new(TezedgeContext::new(

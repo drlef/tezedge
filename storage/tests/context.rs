@@ -141,37 +141,37 @@ pub fn test_context_delete_and_remove() -> Result<(), failure::Error> {
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/0"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/1/a"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/1/b"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/2/a"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5, 61]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/2/b"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5, 62]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/index/123"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5, 6, 7]
     );
 
@@ -212,34 +212,34 @@ pub fn test_context_delete_and_remove() -> Result<(), failure::Error> {
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/0"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/1/a"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5]
     );
     assert_data_deleted!(
         context,
         context_key!("data/rolls/owner/current/cpu/1/b"),
-        context_hash_2.clone()
+        context_hash_2
     );
     assert_data_deleted!(
         context,
         context_key!("data/rolls/owner/current/cpu/2/a"),
-        context_hash_2.clone()
+        context_hash_2
     );
     assert_data_deleted!(
         context,
         context_key!("data/rolls/owner/current/cpu/2/b"),
-        context_hash_2.clone()
+        context_hash_2
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/index/123"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5, 6, 7]
     );
 
@@ -313,31 +313,31 @@ pub fn test_context_copy() -> Result<(), failure::Error> {
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/0"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/1"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/2/a"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5, 61]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/2/b"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5, 62]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/index/123"),
-        context_hash_1.clone(),
+        context_hash_1,
         vec![1, 2, 3, 4, 5, 6, 7]
     );
 
@@ -374,31 +374,31 @@ pub fn test_context_copy() -> Result<(), failure::Error> {
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/0"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/1"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/2/a"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5, 61]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/cpu/2/b"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5, 62]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/current/index/123"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5, 6, 7]
     );
 
@@ -406,25 +406,25 @@ pub fn test_context_copy() -> Result<(), failure::Error> {
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/snapshot/01/02/cpu/0"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/snapshot/01/02/cpu/1"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/snapshot/01/02/cpu/2/a"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5, 61]
     );
     assert_data_eq!(
         context,
         context_key!("data/rolls/owner/snapshot/01/02/cpu/2/b"),
-        context_hash_2.clone(),
+        context_hash_2,
         vec![1, 2, 3, 4, 5, 62]
     );
     assert_data_eq!(
