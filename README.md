@@ -22,5 +22,7 @@ Todo
 -----------
 
 This is my first attempt at writing rust, so the code could definitely be more idiomatic.
+
 The while loops in parsing/operations_for_blocks.rs::path() are quite disgusting, but I haven't yet figured out a better way.
+
 Return more instructive error message when parsing errors occur
