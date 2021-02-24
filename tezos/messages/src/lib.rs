@@ -14,6 +14,7 @@ use crate::p2p::encoding::block_header::{display_fitness, Fitness, Level};
 
 pub mod base;
 pub mod p2p;
+pub mod parsing;
 pub mod protocol;
 
 /// Helper function to format UNIX (integral) timestamp to RFC3339 string timestamp

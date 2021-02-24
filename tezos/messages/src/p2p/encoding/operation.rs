@@ -62,6 +62,14 @@ impl Operation {
     pub fn data(&self) -> &Vec<u8> {
         &self.data
     }
+
+    pub fn new(branch: BlockHash, data: Vec<u8>) -> Self {
+        Operation {
+            branch,
+            data,
+            body: Default::default(),
+        }
+    }
 }
 
 impl From<DecodedOperation> for Operation {
